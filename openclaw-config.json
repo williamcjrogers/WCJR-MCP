@@ -1,0 +1,93 @@
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "nvidia": {
+        "baseUrl": "https://inference.local/v1",
+        "apiKey": "openshell-managed",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "nemotron-3-super-120b-a12b",
+            "name": "NVIDIA Nemotron 3 Super 120B",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 131072,
+            "maxTokens": 4096
+          }
+        ]
+      },
+      "inference": {
+        "baseUrl": "https://inference.local/v1",
+        "apiKey": "unused",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "nvidia/nemotron-3-super-120b-a12b",
+            "name": "nvidia/nemotron-3-super-120b-a12b",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": 131072,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "inference/nvidia/nemotron-3-super-120b-a12b"
+      },
+      "models": {
+        "inference/nvidia/nemotron-3-super-120b-a12b": {}
+      },
+      "compaction": {
+        "mode": "safeguard"
+      }
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "gateway": {
+    "mode": "local",
+    "controlUi": {
+      "allowedOrigins": [
+        "http://127.0.0.1:18789",
+        "http://localhost:18789",
+        "http://localhost:18800"
+      ],
+      "allowInsecureAuth": false,
+      "dangerouslyDisableDeviceAuth": false
+    },
+    "auth": {
+      "mode": "none"
+    },
+    "trustedProxies": [
+      "127.0.0.1",
+      "::1"
+    ]
+  },
+  "plugins": {
+    "entries": {
+      "nemoclaw": {
+        "enabled": true
+      }
+    },
+    "installs": {
+      "nemoclaw": {
+        "source": "path",
+        "sourcePath": "/opt/nemoclaw",
+        "installPath": "/sandbox/.openclaw/extensions/nemoclaw",
+        "version": "0.1.0",
+        "installedAt": "2026-03-20T05:23:12.344Z"
+      }
+    }
+  }
+}

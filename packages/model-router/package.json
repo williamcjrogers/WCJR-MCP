@@ -1,0 +1,9 @@
+{
+  "name": "@wcjr/model-router",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "@wcjr/activity-profiles": "0.1.0"
+  }
+}

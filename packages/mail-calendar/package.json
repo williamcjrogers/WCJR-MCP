@@ -1,0 +1,13 @@
+{
+  "name": "@wcjr/mail-calendar",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "@azure/msal-node": "^2.16.2",
+    "@wcjr/document-ingestion": "0.1.0",
+    "zod": "^3.24.1"
+  }
+}

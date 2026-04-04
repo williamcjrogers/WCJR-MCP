@@ -1,0 +1,11 @@
+{
+  "name": "@wcjr/shell-exec",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server: execute shell commands in a scoped working directory",
+  "main": "src/server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "*",
+    "zod": "*"
+  }
+}

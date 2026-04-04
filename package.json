@@ -1,0 +1,44 @@
+{
+  "name": "wcjr-mcp-assistant",
+  "version": "0.1.0",
+  "description": "Desktop-first local assistant with multi-provider routing, MCP tools, and optional NemoClaw sandboxed runs.",
+  "author": "WCJR",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "@google/genai": "^1.3.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@wcjr/activity-profiles": "0.1.0",
+    "@wcjr/browser-ops": "0.1.0",
+    "@wcjr/conversation-store": "0.1.0",
+    "@wcjr/desktop-commander": "0.1.0",
+    "@wcjr/document-ops": "0.1.0",
+    "@wcjr/file-ops": "0.1.0",
+    "@wcjr/filesystem-mcp": "0.1.0",
+    "@wcjr/mail-calendar": "0.1.0",
+    "@wcjr/memory-mcp": "0.1.0",
+    "@wcjr/memory-store": "0.1.0",
+    "@wcjr/messaging-bridge": "0.1.0",
+    "@wcjr/mcp-hub": "0.1.0",
+    "@wcjr/model-router": "0.1.0",
+    "@wcjr/orchestrator": "0.1.0",
+    "@wcjr/policy-engine": "0.1.0",
+    "@wcjr/providers": "0.1.0",
+    "@wcjr/task-store": "0.1.0",
+    "openai": "^4.96.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.24.1"
+  },
+  "scripts": {
+    "dev": "npm --workspace apps/desktop run dev",
+    "start": "npm --workspace apps/desktop run start",
+    "test": "node --test",
+    "dist:win": "electron-builder --config electron-builder.json",
+    "desktop-shortcut": "powershell -ExecutionPolicy Bypass -File ./Create-DesktopShortcut.ps1"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@wcjr/orchestrator",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "@wcjr/activity-profiles": "0.1.0",
+    "@wcjr/mcp-hub": "0.1.0",
+    "@wcjr/model-router": "0.1.0"
+  }
+}

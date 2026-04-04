@@ -1,0 +1,11 @@
+{
+  "name": "@wcjr/git-ops",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server: git operations (status, diff, log, commit, branch, stash)",
+  "main": "src/server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "*",
+    "zod": "*"
+  }
+}

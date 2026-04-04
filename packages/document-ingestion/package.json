@@ -1,0 +1,11 @@
+{
+  "name": "@wcjr/document-ingestion",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "mammoth": "^1.9.1",
+    "pdf-parse": "^1.1.1",
+    "tesseract.js": "^6.0.1"
+  }
+}

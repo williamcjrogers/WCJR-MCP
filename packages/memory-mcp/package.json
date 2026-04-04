@@ -1,0 +1,11 @@
+{
+  "name": "@wcjr/memory-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@wcjr/memory-store": "0.1.0",
+    "zod": "^3.24.1"
+  }
+}

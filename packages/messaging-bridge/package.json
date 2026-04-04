@@ -1,0 +1,10 @@
+{
+  "name": "@wcjr/messaging-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "dependencies": {
+    "zod": "^3.24.1",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

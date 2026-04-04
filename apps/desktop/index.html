@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en" data-theme="midnight">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self';" />
+    <title>WCJR Assistant</title>
+    <script src="./theme-bootstrap.js"></script>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#command-center">Skip to workspace</a>
+    <div class="app-shell">
+      <header class="topbar" role="banner">
+        <div class="brand-block">
+          <div class="brand-row">
+            <span class="brand-mark" aria-hidden="true"><span class="brand-mark-inner">W</span></span>
+            <div class="brand-copy">
+              <h1>WCJR Assistant</h1>
+              <p class="subtitle">Local control center for routed models, MCP tools, and optional sandbox runs.</p>
+            </div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <label class="theme-picker">
+            <span class="theme-picker-label">Theme</span>
+            <select id="theme-select" class="theme-select" title="Color theme"></select>
+          </label>
+          <span id="status-dot" class="dot dot-off" title="No providers connected" aria-hidden="true"></span>
+          <span id="topbar-summary" class="topbar-summary" role="status" aria-live="polite">No providers or tools configured yet.</span>
+          <button id="btn-setup" type="button" class="btn secondary">Setup &amp; tools</button>
+        </div>
+      </header>
+
+      <div id="error-banner" class="error-banner hidden"></div>
+      <div id="runtime-diagnostics" class="runtime-diagnostics hint"></div>
+
+      <section id="setup-panel" class="panel setup-panel">
+        <div class="setup-grid setup-grid-primary">
+          <section class="setup-section">
+            <h2>Appearance</h2>
+            <p class="hint">Choose a color theme. The current theme is always visible here and in the top bar.</p>
+            <select id="theme-select-setup" class="theme-select theme-select-wide" title="Color theme"></select>
+            <div id="theme-palette" class="chip-row theme-palette"></div>
+          </section>
+
+          <section class="setup-section">
+            <h2>Provider Setup</h2>
+            <p class="hint">Paste your API keys below. They are encrypted locally and never leave this machine. This section is kept on the home screen so provider access is always visible.</p>
+            <div id="key-fields"></div>
+            <div class="row">
+              <button id="btn-save-keys" class="btn primary">Save Keys</button>
+              <button id="btn-refresh-models" class="btn secondary">Refresh Models</button>
+            </div>
+            <div id="model-fetch-status" class="hint"></div>
+          </section>
+        </div>
+
+        <div class="advanced-setup-strip">
+          <div>
+            <div class="conversation-toolbar-label">Extended setup</div>
+            <div class="task-meta">Models, tools, messaging, policy, and desktop integrations.</div>
+          </div>
+          <button id="btn-close-setup" class="btn secondary hidden" type="button">Collapse</button>
+        </div>
+
+        <div id="advanced-setup-body" class="advanced-setup-body hidden">
+        <div class="setup-grid">
+          <section class="setup-section">
+            <h2>Model Profiles</h2>
+            <p class="hint">Choose which model handles each task type by default. You can still override per run.</p>
+            <div id="profile-editor"></div>
+            <button id="btn-save-profiles" class="btn secondary">Save Profiles</button>
+          </section>
+
+          <section class="setup-section">
+            <h2>Remote commander (Telegram)</h2>
+            <p class="hint">Send commands from Telegram and receive task updates. Create a bot with @BotFather, then add the token and your chat ID (from @userinfobot).</p>
+            <label class="toggle-row">
+              <input id="messaging-enabled" type="checkbox" />
+              <span>Enable remote commands</span>
+            </label>
+            <div class="row">
+              <input id="messaging-bot-token" class="text-input" type="password" placeholder="Bot token" />
+              <input id="messaging-chat-ids" class="text-input" type="text" placeholder="Your Telegram chat ID (e.g. 123456789)" />
+            </div>
+            <button id="btn-save-messaging" class="btn secondary">Save & connect</button>
+          </section>
+
+          <section class="setup-section">
+            <h2>Memory</h2>
+            <p class="hint">The assistant can remember your preferences, company details, projects, and explicit instructions across chats.</p>
+            <label class="toggle-row">
+              <input id="memory-enabled" type="checkbox" />
+              <span>Enable persistent memory</span>
+            </label>
+            <label class="toggle-row">
+              <input id="memory-autocapture" type="checkbox" />
+              <span>Automatically capture important facts and preferences</span>
+            </label>
+            <button id="btn-save-memory" class="btn secondary">Save Memory Settings</button>
+          </section>
+
+          <section class="setup-section">
+            <h2>Desktop Commander</h2>
+            <p class="hint">Desktop Commander gives the assistant Windows desktop actions such as launching apps, reading/writing clipboard, opening Explorer, and checking running processes.</p>
+            <label class="toggle-row">
+              <input id="desktop-commander-enabled" type="checkbox" />
+              <span>Enable Desktop Commander</span>
+            </label>
+            <div class="row">
+              <input id="lookeen-path" class="text-input" type="text" placeholder="Lookeen desktop app path (Lookeen.exe, not mcp.exe)" />
+              <button id="btn-pick-lookeen" class="btn secondary">Browse</button>
+            </div>
+            <p class="hint">If you have the separate Lookeen MCP binary such as <code>...\Desktop\mcp.exe</code>, add it under Custom MCP Server instead of here.</p>
+            <button id="btn-save-desktop-commander" class="btn secondary">Save Desktop Commander</button>
+          </section>
+
+          <section class="setup-section">
+            <h2>Autonomy / Policy</h2>
+            <p class="hint">Control when the assistant may act without confirmation: Observe (read-only), Assist (confirm all actions), Scoped Autonomy, or High Autonomy.</p>
+            <div class="row">
+              <label>Profile</label>
+              <select id="policy-profile" class="profile-select">
+                <option value="observe">Observe (read only)</option>
+                <option value="assist">Assist (confirm sends/edits)</option>
+                <option value="scoped_autonomy">Scoped Autonomy</option>
+                <option value="high_autonomy">High Autonomy</option>
+              </select>
+            </div>
+            <button id="btn-save-policy" class="btn secondary">Save Policy</button>
+          </section>
+        </div>
+
+        <section class="setup-section setup-section-tools">
+          <h2>MCP Tools</h2>
+          <p class="hint">Connect local and remote tools here. Start with Local Filesystem to let the assistant inspect files under a chosen folder.</p>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Local Filesystem</h3>
+                <p class="hint">Add one or more folders or drive roots the assistant can inspect. Type paths like <code>C:\</code> or <code>D:\Projects</code>, or browse for folders.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="filesystem-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input id="filesystem-full-access" type="checkbox" />
+              <span>Allow absolute paths anywhere on this machine</span>
+            </label>
+            <div id="filesystem-roots" class="root-list"></div>
+            <div class="row">
+              <button id="btn-add-filesystem-root" class="btn secondary">Add location</button>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Documents &amp; Reports</h3>
+                <p class="hint">Output folder for generated Markdown, reports, CSV, and XLSX. The assistant can write_markdown, write_report, export_csv, export_xlsx here.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="document-ops-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+            <div class="row">
+              <input id="document-ops-root" class="text-input" type="text" placeholder="Output folder for reports and exports" />
+              <button id="btn-pick-document-ops-dir" class="btn secondary">Browse</button>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Browser / Web fetch</h3>
+                <p class="hint">Fetch web page content when no native API exists. Does not run JavaScript.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="browser-ops-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Desktop Commander</h3>
+                <p class="hint">Launch desktop apps, inspect running processes, use clipboard, open Explorer paths, and expose Lookeen through a configured app alias.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="desktop-commander-mcp-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Persistent Memory</h3>
+                <p class="hint">Searches and stores long-term preferences, profile facts, and recurring instructions across conversations.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="memory-mcp-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>File organization</h3>
+                <p class="hint">Move, rename, create folders, propose organization plans, and archive across one or more selected locations. Uses dry-run by default; confirm before applying.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="file-ops-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input id="file-ops-full-access" type="checkbox" />
+              <span>Allow file operations anywhere on this machine</span>
+            </label>
+            <div id="file-ops-roots" class="root-list"></div>
+            <div class="row">
+              <button id="btn-add-file-ops-root" class="btn secondary">Add location</button>
+            </div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Mail &amp; Calendar (Microsoft 365)</h3>
+                <p class="hint">Read inbox, draft replies, send email, list and create calendar events. Sign in with device code once; then enable the server.</p>
+              </div>
+              <label class="toggle-row">
+                <input id="mail-calendar-enabled" type="checkbox" />
+                <span>Enabled</span>
+              </label>
+            </div>
+            <div class="row">
+              <input id="mail-calendar-client-id" class="text-input" type="text" placeholder="Application (client) ID" />
+              <input id="mail-calendar-tenant-id" class="text-input" type="text" placeholder="Directory (tenant) ID" />
+            </div>
+            <div class="row">
+              <button id="btn-mail-calendar-signin" class="btn secondary">Sign in with device code</button>
+              <span id="mail-calendar-status" class="hint"></span>
+            </div>
+            <div id="mail-calendar-device-message" class="device-code-message hidden"></div>
+          </div>
+
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <div>
+                <h3>Custom MCP Server</h3>
+                <p class="hint">Add stdio or streamable HTTP MCP servers without leaving the app. For Lookeen MCP, use stdio and point the command to <code>mcp.exe</code>.</p>
+              </div>
+            </div>
+            <div class="mcp-form-grid">
+              <input id="mcp-name" class="text-input" type="text" placeholder="Server name" />
+              <select id="mcp-transport">
+                <option value="stdio">Command (stdio)</option>
+                <option value="streamable-http">HTTP (streamable)</option>
+              </select>
+              <input id="mcp-target" class="text-input" type="text" placeholder="Command path or URL" />
+              <input id="mcp-args" class="text-input" type="text" placeholder="Args for stdio servers, separated by spaces" />
+            </div>
+            <div class="row">
+              <button id="btn-add-mcp" class="btn secondary">Add Server</button>
+              <button id="btn-save-tools" class="btn secondary">Save Tool Config</button>
+              <button id="btn-connect-mcp" class="btn primary">Connect Tools</button>
+            </div>
+            <div id="mcp-connect-status" class="hint"></div>
+            <div id="mcp-server-list" class="server-list"></div>
+          </div>
+        </section>
+        </div>
+      </section>
+
+      <main id="command-center" class="command-center" tabindex="-1">
+        <div class="input-area">
+          <div class="conversation-toolbar">
+            <div>
+              <div class="conversation-toolbar-label">Current workflow</div>
+              <div id="active-conversation-title" class="conversation-toolbar-title">New conversation</div>
+            </div>
+            <div class="conversation-toolbar-actions">
+              <button id="btn-toggle-sidebar" class="btn secondary" type="button">Sidebar</button>
+              <button id="btn-new-conversation" class="btn secondary">New conversation</button>
+            </div>
+          </div>
+          <section class="panel activity-profile-panel">
+            <div class="activity-profile-strip">
+              <div>
+                <div class="conversation-toolbar-label">Workflow engine</div>
+                <div id="activity-profile-title" class="conversation-toolbar-title">Automatic orchestration</div>
+              </div>
+              <div class="activity-profile-strip-actions">
+                <div id="activity-profile-default-model" class="task-meta"></div>
+                <button id="btn-toggle-activity-detail" class="btn-link" type="button">How it routes</button>
+              </div>
+            </div>
+            <div id="activity-profile-detail" class="activity-profile-detail hidden">
+              <div id="activity-profile-description" class="activity-profile-description"></div>
+              <div class="activity-profile-groups">
+                <div>
+                  <div class="conversation-toolbar-label">Capability packs</div>
+                  <div id="activity-profile-mcps" class="chip-row"></div>
+                </div>
+                <div>
+                  <div class="conversation-toolbar-label">Routing hints</div>
+                  <div id="activity-profile-skills" class="chip-row"></div>
+                </div>
+                <div>
+                  <div class="conversation-toolbar-label">Internal workers</div>
+                  <div id="activity-profile-agents" class="chip-row"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="panel quick-actions-panel">
+            <div class="sidebar-panel-header">
+              <h3>Quick Actions</h3>
+              <span class="task-meta">Outcome starters</span>
+            </div>
+            <div id="quick-actions" class="chip-row quick-actions-row">
+              <button type="button" class="chip chip-action" data-task-type="orchestrator" data-prompt-template="Forensically review this app. Identify the highest-severity issues, explain the root causes, then implement the most valuable fixes and verify them.">Forensic review</button>
+              <button type="button" class="chip chip-action" data-task-type="orchestrator" data-prompt-template="Audit this codebase for architecture, correctness, maintainability, and UX friction. Prioritize the top changes and implement the best improvements.">Codebase overhaul</button>
+              <button type="button" class="chip chip-action" data-task-type="orchestrator" data-prompt-template="Turn this app into a production-ready operator console. Propose a short workflow, then improve the highest-value user flows.">Operator console</button>
+              <button type="button" class="chip chip-action" data-task-type="orchestrator" data-prompt-template="Summarize the current state of this app, the risks, the strongest opportunities, and the concrete next actions.">Executive summary</button>
+            </div>
+          </section>
+          <div class="goal-first-hint">Describe the outcome you want. The orchestrator will infer the workflow, choose tools and models, and handle the sequencing.</div>
+          <textarea id="task-prompt" rows="4" placeholder="Describe the outcome you want, what matters, and any constraints..."></textarea>
+          <div id="plan-approval-banner" class="plan-approval-banner hidden" role="status">
+            <div class="plan-approval-inner">
+              <div class="plan-approval-copy">
+                <strong>Workflow ready</strong>
+                <span class="hint">Review the workflow below. Approval is required before execution starts.</span>
+              </div>
+              <div id="plan-phase-list" class="plan-phase-list hidden" aria-live="polite"></div>
+              <button type="button" id="btn-approve-plan" class="btn primary">Approve &amp; run</button>
+              <button type="button" id="btn-dismiss-plan" class="btn secondary">Dismiss</button>
+            </div>
+          </div>
+          <div class="input-controls">
+            <button id="btn-toggle-advanced" class="btn secondary btn-sm" type="button">Options</button>
+            <div id="advanced-options" class="advanced-options hidden">
+              <select id="execution-mode" title="How the Orchestrator runs">
+                <option value="plan_first">Preview workflow first (default)</option>
+                <option value="direct">Run immediately (skip preview)</option>
+              </select>
+              <select id="task-type" title="Manual routing override (advanced)"></select>
+              <select id="model-override" title="Model override (optional)">
+                <option value="">Auto (use profile)</option>
+              </select>
+              <select id="run-mode" title="Execution mode">
+                <option value="direct">Direct</option>
+                <option value="sandboxed">Sandboxed (NemoClaw)</option>
+              </select>
+              <select id="sandbox-preference" title="When to use sandbox">
+                <option value="manual">Sandbox: manual only</option>
+                <option value="risky">Prefer sandbox for risky tasks</option>
+              </select>
+            </div>
+            <button id="btn-run" class="btn primary">Run</button>
+          </div>
+          <div class="status-strip">
+            <div id="sandbox-status" class="hint"></div>
+            <div id="tool-status" class="hint"></div>
+          </div>
+        </div>
+
+        <div class="workspace-grid">
+          <aside class="sidebar-column">
+            <section class="panel sidebar-panel">
+              <div class="sidebar-panel-header">
+                <h3>Conversations</h3>
+              </div>
+              <input id="conversation-filter" class="text-input sidebar-filter" type="text" placeholder="Filter conversations" />
+              <div id="conversation-list" class="task-list empty-state">No conversations yet.</div>
+            </section>
+
+            <section class="panel sidebar-panel">
+              <div class="sidebar-panel-header">
+                <h3>Memory</h3>
+                <span id="memory-count" class="task-meta">0 saved</span>
+              </div>
+              <input id="memory-filter" class="text-input sidebar-filter" type="text" placeholder="Filter memory" />
+              <div id="memory-list" class="task-list empty-state">No memories saved yet.</div>
+            </section>
+
+            <section class="panel sidebar-panel">
+              <div class="sidebar-panel-header">
+                <h3>Execution Summary</h3>
+                <span id="selected-task-meta" class="task-meta">No task selected</span>
+              </div>
+              <div id="run-badges" class="badge-row"></div>
+              <div id="run-summary" class="summary-list empty-state">No run yet.</div>
+            </section>
+
+            <section class="panel sidebar-panel">
+              <h3>Timeline</h3>
+              <div id="timeline" class="timeline-list empty-state">Run the assistant to see classification, tooling, and model selection steps.</div>
+            </section>
+
+            <section class="panel sidebar-panel">
+              <h3>Tools Used</h3>
+              <div id="tool-activity" class="summary-list empty-state">No MCP tools used yet.</div>
+            </section>
+
+            <section class="panel sidebar-panel">
+              <div class="sidebar-panel-header">
+                <h3>Audit Trail</h3>
+                <span id="audit-count" class="task-meta">0 events</span>
+              </div>
+              <div id="audit-trail" class="summary-list empty-state">Select a task to inspect task-level events.</div>
+            </section>
+
+            <section class="panel sidebar-panel">
+              <div class="sidebar-panel-header">
+                <h3>Recent Tasks</h3>
+              </div>
+              <div class="sidebar-filter-grid">
+                <input id="task-filter" class="text-input sidebar-filter" type="text" placeholder="Filter tasks" />
+                <select id="task-status-filter" class="profile-select">
+                  <option value="">All statuses</option>
+                  <option value="running">Running</option>
+                  <option value="awaiting_approval">Awaiting approval</option>
+                  <option value="completed">Completed</option>
+                  <option value="failed">Failed</option>
+                </select>
+              </div>
+              <div id="task-list" class="task-list empty-state">No tasks yet.</div>
+            </section>
+          </aside>
+
+          <section id="output-area" class="output-area">
+            <div id="output-status" class="output-status hidden"></div>
+            <div id="output" class="output"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

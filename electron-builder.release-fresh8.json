@@ -1,0 +1,47 @@
+{
+  "appId": "com.wcjr.assistant",
+  "productName": "WCJR Assistant",
+  "asar": false,
+  "icon": "build/icon.png",
+  "directories": {
+    "output": "release-fresh8"
+  },
+  "files": [
+    "apps/**/*",
+    "packages/**/*",
+    "node_modules/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "apps/desktop/main.js"
+  },
+  "extraResources": [
+    {
+      "from": "packages/filesystem-mcp/src/server.js",
+      "to": "filesystem-mcp/server.js"
+    },
+    {
+      "from": "packages/document-ops/src/server.js",
+      "to": "document-ops/server.js"
+    },
+    {
+      "from": "packages/file-ops/src/server.js",
+      "to": "file-ops/server.js"
+    },
+    {
+      "from": "packages/browser-ops/src/server.js",
+      "to": "browser-ops/server.js"
+    },
+    {
+      "from": "packages/mail-calendar/src/server.js",
+      "to": "mail-calendar/server.js"
+    }
+  ],
+  "win": {
+    "target": [
+      "portable"
+    ],
+    "icon": "build/icon.png",
+    "artifactName": "WCJR-Assistant-${version}.${ext}"
+  }
+}

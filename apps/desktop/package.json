@@ -1,0 +1,21 @@
+{
+  "name": "desktop",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@wcjr/activity-profiles": "0.1.0",
+    "@wcjr/orchestrator": "0.1.0",
+    "@wcjr/providers": "0.1.0",
+    "@wcjr/tool-loop": "0.1.0",
+    "electron": "^37.2.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "electron-builder": "^26.8.1"
+  }
+}
