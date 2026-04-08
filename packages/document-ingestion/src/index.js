@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 import mammoth from "mammoth";
@@ -362,4 +363,85 @@ export async function extractDocumentStructured({
   // Non-DOCX: fall back to plain extraction
   const result = await extractDocumentText({ buffer, fileName, contentType, maxChars });
   return { ...result, structure: null };
+}
+
+/**
+ * Strip RE:/FW:/Fwd: prefixes from a subject and produce a simple hash for threading.
+ * @param {string} subject
+ * @returns {{ normalised: string, threadId: string }}
+ */
+export function normaliseSubjectForThreading(subject) {
+  const normalised = String(subject ?? "")
+    .replace(/^(\s*(re|fw|fwd)\s*:\s*)+/gi, "")
+    .trim();
+  const threadId = createHash("sha256").update(normalised.toLowerCase()).digest("hex").slice(0, 16);
+  return { normalised, threadId };
+}
+
+/**
+ * Extract structured email metadata from .msg or .eml files.
+ * @param {{ buffer: Buffer, fileName: string }} params
+ * @returns {Promise<{ from: string, to: string, cc: string, date: string, subject: string, body: string, threadId: string } | null>}
+ */
+export async function extractEmailMetadata({ buffer, fileName }) {
+  const ext = path.extname(fileName ?? "").toLowerCase();
+  const inputBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer ?? []);
+
+  if (ext === ".msg") {
+    const { default: MsgReader } = await import("msgreader");
+    const reader = new MsgReader(new Uint8Array(inputBuffer));
+    const data = reader.getFileData();
+    if (data.error) throw new Error(`MSG parse error: ${data.error}`);
+
+    const from = [data.senderName, data.senderEmail ? `<${data.senderEmail}>` : ""]
+      .filter(Boolean).join(" ");
+    const to = (data.recipients ?? [])
+      .filter((r) => !r.recipType || r.recipType === 1)
+      .map((r) => r.name || r.email || "")
+      .join(", ");
+    const cc = (data.recipients ?? [])
+      .filter((r) => r.recipType === 2)
+      .map((r) => r.name || r.email || "")
+      .join(", ");
+
+    let date = "";
+    if (data.headers) {
+      const dateMatch = String(data.headers).match(/Date:\s*(.+)/i);
+      if (dateMatch) date = dateMatch[1].trim();
+    }
+
+    const subject = data.subject ?? "";
+    const body = data.body ?? "";
+    const { threadId } = normaliseSubjectForThreading(subject);
+
+    return { from, to, cc, date, subject, body, threadId };
+  }
+
+  if (ext === ".eml") {
+    const raw = inputBuffer.toString("utf-8");
+
+    // Split headers from body at first double newline
+    const headerBodySplit = raw.indexOf("\n\n");
+    const headerBlock = headerBodySplit >= 0 ? raw.slice(0, headerBodySplit) : raw;
+    const body = headerBodySplit >= 0 ? raw.slice(headerBodySplit + 2).trim() : "";
+
+    // Unfold continuation lines (RFC 2822)
+    const unfolded = headerBlock.replace(/\r?\n[ \t]+/g, " ");
+
+    const getHeader = (name) => {
+      const match = unfolded.match(new RegExp(`^${name}:\\s*(.+)$`, "im"));
+      return match ? match[1].trim() : "";
+    };
+
+    const from = getHeader("From");
+    const to = getHeader("To");
+    const cc = getHeader("Cc");
+    const date = getHeader("Date");
+    const subject = getHeader("Subject");
+    const { threadId } = normaliseSubjectForThreading(subject);
+
+    return { from, to, cc, date, subject, body, threadId };
+  }
+
+  return null;
 }
