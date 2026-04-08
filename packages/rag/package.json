@@ -1,0 +1,14 @@
+{
+  "name": "@wcjr/rag",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./chunker": "./src/chunker.js"
+  },
+  "dependencies": {
+    "@qdrant/js-client-rest": "^1.17.0"
+  }
+}
