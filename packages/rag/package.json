@@ -6,7 +6,8 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./chunker": "./src/chunker.js"
+    "./chunker": "./src/chunker.js",
+    "./citation": "./src/citation.js"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.17.0"
