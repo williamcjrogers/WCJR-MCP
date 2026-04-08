@@ -1678,8 +1678,8 @@ function hasConnectedTools(toolSummary) {
   );
 }
 
-async function buildTelegramManagerReply({ requestText, summary }) {
-  return buildTelegramManagerText({ requestText, summary });
+async function buildTelegramManagerReply({ requestText, summary, metadata }) {
+  return buildTelegramManagerText({ requestText, summary, metadata });
 }
 
 function getTaskRemoteOrigin(taskId) {
@@ -1729,6 +1729,129 @@ async function pushOpsNotification(text) {
     chatId: String(chatIds[0]),
     type: "progress",
     summary: text
+  });
+}
+
+/**
+ * Rate-limited Telegram progress notifier.
+ * Sends at most one progress message per minIntervalMs, capped at maxMessages per task.
+ */
+class TelegramProgressThrottle {
+  constructor({ minIntervalMs = 20000, maxMessages = 10 } = {}) {
+    this.minIntervalMs = minIntervalMs;
+    this.maxMessages = maxMessages;
+    this.lastSentAt = 0;
+    this.sentCount = 0;
+    this.pending = null;
+  }
+
+  reset() {
+    this.lastSentAt = 0;
+    this.sentCount = 0;
+    this.pending = null;
+  }
+
+  async maybeSend(taskId, text) {
+    if (!text || this.sentCount >= this.maxMessages) return;
+    const now = Date.now();
+    if (now - this.lastSentAt < this.minIntervalMs) {
+      this.pending = { taskId, text };
+      return;
+    }
+    this.pending = null;
+    this.lastSentAt = now;
+    this.sentCount++;
+    pushOpsNotification(text).catch(() => {});
+  }
+
+  async flush(taskId) {
+    if (this.pending?.taskId === taskId && this.sentCount < this.maxMessages) {
+      this.sentCount++;
+      pushOpsNotification(this.pending.text).catch(() => {});
+      this.pending = null;
+    }
+  }
+}
+
+const telegramThrottle = new TelegramProgressThrottle();
+
+/**
+ * Parse orchestrator status text into a structured progress detail object.
+ */
+function parseStatusToDetail(text) {
+  if (!text) return { message: text };
+  const detail = { message: text };
+
+  // "Retrieval broker: querying Lookeen..."
+  const retrievalMatch = text.match(/Retrieval broker:\s*(?:querying|searching|extracting)\s+(.+?)(?:\.{3}|$)/i);
+  if (retrievalMatch) {
+    detail.phase = "retrieval";
+    detail.source = retrievalMatch[1].trim();
+    return detail;
+  }
+
+  // "Research: QuestionFramer (perplexity/sonar-pro)..."
+  const agentMatch = text.match(/^(.+?):\s+(\w[\w\s]*?)\s+\((\w+)\/([\w.-]+)\)/);
+  if (agentMatch) {
+    detail.phase = "specialist";
+    detail.agent = agentMatch[2].trim();
+    detail.provider = agentMatch[3];
+    detail.model = agentMatch[4];
+    return detail;
+  }
+
+  // "Research: Synthesizing (anthropic/claude-sonnet)..."
+  const synthMatch = text.match(/^(.+?):\s+Synthesizing\s+\((\w+)\/([\w.-]+)\)/i);
+  if (synthMatch) {
+    detail.phase = "synthesis";
+    detail.provider = synthMatch[2];
+    detail.model = synthMatch[3];
+    return detail;
+  }
+
+  // "Using openai / gpt-5.4 for 'documents' task..."
+  const usingMatch = text.match(/Using\s+(\w+)\s*\/\s*([\w.-]+)/i);
+  if (usingMatch) {
+    detail.phase = "execution";
+    detail.provider = usingMatch[1];
+    detail.model = usingMatch[2];
+    return detail;
+  }
+
+  // "Orchestrator (anthropic / claude-sonnet)..."
+  const orchMatch = text.match(/Orchestrator\s+\((\w+)\s*\/\s*([\w.-]+)\)/i);
+  if (orchMatch) {
+    detail.phase = "planning";
+    detail.provider = orchMatch[1];
+    detail.model = orchMatch[2];
+    return detail;
+  }
+
+  // "Connecting MCP tools..."
+  if (/connecting mcp tools/i.test(text)) {
+    detail.phase = "tooling";
+    return detail;
+  }
+
+  // "Querying Context7 docs for ..."
+  if (/querying context7/i.test(text)) {
+    detail.phase = "retrieval";
+    detail.source = "Context7";
+    return detail;
+  }
+
+  return detail;
+}
+
+function emitProgressDetail(detail) {
+  emitStream({
+    type: "progress_detail",
+    phase: detail.phase ?? null,
+    agent: detail.agent ?? null,
+    source: detail.source ?? null,
+    model: detail.model ?? null,
+    provider: detail.provider ?? null,
+    message: detail.message ?? ""
   });
 }
 
@@ -1995,7 +2118,10 @@ function createOrchestrator() {
     resolveProvider,
     hasApiKey: async (providerId) => providerId === "ollama" || !!getDecryptedKey(providerId),
     invokeModel: invokeAgenticModel,
-    emitStatus: (text) => emitStream({ type: "status", text: `${text}\n\n` }),
+    emitStatus: (text) => {
+      emitStream({ type: "status", text: `${text}\n\n` });
+      emitProgressDetail(parseStatusToDetail(text));
+    },
     emitText: (text) => emitStream({ type: "text", text }),
     detectSandboxStatus,
     runSandboxedTask
@@ -2171,6 +2297,8 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
   if (mainWindow) {
     mainWindow.webContents.send("assistant:taskUpdated", { taskId: task.id, status: TASK_STATUS.RUNNING });
   }
+  const taskStartTime = Date.now();
+  telegramThrottle.reset();
   pushOpsNotification(`Task started: ${compactWorkflowText(rawPrompt).slice(0, 80)}`).catch(() => {});
 
   conversationStoreRef.appendMessage(activeConversation.id, {
@@ -2199,6 +2327,14 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
     mainWindow.webContents.send("assistant:memoryUpdated");
   }
 
+  let taskUpdatedDebounce = null;
+  function debouncedTaskUpdated(payload) {
+    if (taskUpdatedDebounce) clearTimeout(taskUpdatedDebounce);
+    taskUpdatedDebounce = setTimeout(() => {
+      if (mainWindow) mainWindow.webContents.send("assistant:taskUpdated", payload);
+    }, 300);
+  }
+
   const taskContext = {
     taskId: task.id,
     policyApproved,
@@ -2208,11 +2344,13 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
       if (mainWindow) {
         mainWindow.webContents.send("assistant:taskUpdated", { taskId: task.id, progress });
       }
+      telegramThrottle.maybeSend(task.id, progress.message).catch(() => {});
     },
     onToolActivity: (toolActivity) => {
       store.update(task.id, { toolActivity });
       store.appendAuditEntry(task.id, "tool_activity", { count: toolActivity?.length ?? 0 });
       store.save();
+      debouncedTaskUpdated({ taskId: task.id, toolActivity });
     },
     onToolTrace: (toolTrace) => {
       store.update(task.id, { toolTrace });
@@ -2222,6 +2360,10 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
     onAudit: (action, detail) => {
       store.appendAuditEntry(task.id, action, detail);
       store.save();
+      debouncedTaskUpdated({ taskId: task.id, audit: true });
+      if (action === "subagent_completed" && detail?.agentName) {
+        telegramThrottle.maybeSend(task.id, `Specialist "${detail.agentName}" completed`).catch(() => {});
+      }
     }
   };
 
@@ -2274,7 +2416,24 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
     );
     await store.save();
 
+    const taskMetadata = {
+      model: summary?.model ?? null,
+      provider: summary?.provider ?? null,
+      elapsedMs: Date.now() - taskStartTime,
+      agentRuns: summary?.agentRuns ?? [],
+      toolCount: (summary?.toolActivity ?? []).length
+    };
+
     if (summary?.error) {
+      telegramThrottle.flush(task.id).catch(() => {});
+      await sendTelegramTaskManagerUpdate(
+        task.id,
+        buildTelegramManagerFallback({
+          requestText: rawPrompt,
+          summary: { error: summary.error },
+          metadata: taskMetadata
+        })
+      );
       if (mainWindow) {
         mainWindow.webContents.send("assistant:streamError", { error: summary.error });
         mainWindow.webContents.send("assistant:taskUpdated", { taskId: task.id, status: TASK_STATUS.FAILED });
@@ -2311,6 +2470,18 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
         taskId: task.id,
         status: pendingApproval ? TASK_STATUS.AWAITING_APPROVAL : TASK_STATUS.COMPLETED
       });
+    }
+
+    telegramThrottle.flush(task.id).catch(() => {});
+    if (!pendingApproval) {
+      await sendTelegramTaskManagerUpdate(
+        task.id,
+        buildTelegramManagerText({
+          requestText: rawPrompt,
+          summary: { content: assistantContent || (summary?.content ?? "") },
+          metadata: taskMetadata
+        })
+      );
     }
 
     return {
@@ -3441,7 +3612,7 @@ async function startMessagingBridge() {
         const summary = await runAssistantTaskRequest(
           {
             prompt: trimmedText,
-            executionMode: appConfig?.executionMode ?? "plan_first"
+            executionMode: "direct"
           },
           {
             remoteOrigin: {
