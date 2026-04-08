@@ -32,18 +32,48 @@ const server = new McpServer({
 });
 
 server.registerTool(
-  "list_inbox",
+  "get_mail_profile",
   {
-    description: "List recent inbox messages (Microsoft 365).",
+    description: "Get the display name and email address of the currently authenticated Microsoft 365 account.",
+    inputSchema: {}
+  },
+  async () => {
+    const c = await getConnector();
+    const profile = await c.getProfile();
+    return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "list_mail_folders",
+  {
+    description: "List all mail folders in the mailbox, including subfolders. Optionally query a shared mailbox.",
     inputSchema: {
-      top: z.number().int().min(1).max(50).optional().describe("Max number of messages (default 20).")
+      mailbox: z.string().optional().describe("Email address of a shared mailbox to query. Omit for the authenticated user's mailbox.")
     }
   },
-  async ({ top }) => {
+  async ({ mailbox }) => {
     const c = await getConnector();
-    const list = await c.listInbox({ top });
+    const folders = await c.listMailFolders(mailbox);
+    return { content: [{ type: "text", text: JSON.stringify(folders, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "list_inbox",
+  {
+    description: "List recent messages from a mail folder (Microsoft 365). Defaults to inbox.",
+    inputSchema: {
+      top: z.number().int().min(1).max(50).optional().describe("Max number of messages (default 20)."),
+      folder: z.string().optional().describe("Mail folder ID or well-known name (inbox, drafts, sentitems, deleteditems). Default: inbox"),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
+    }
+  },
+  async ({ top, folder, mailbox }) => {
+    const c = await getConnector();
+    const list = await c.listInbox({ top, folder, mailbox });
     const text = list.length === 0
-      ? "No messages in inbox."
+      ? "No messages in folder."
       : list.map((m, i) => `${i + 1}. ${m.subject} | from: ${m.from} | ${m.receivedAt}`).join("\n");
     return { content: [{ type: "text", text }] };
   }
@@ -55,12 +85,13 @@ server.registerTool(
     description: "Get a single email message by ID (from list_inbox).",
     inputSchema: {
       messageId: z.string().describe("Message ID from list_inbox."),
-      maxChars: z.number().int().min(500).max(50000).optional().describe("Maximum characters to return.")
+      maxChars: z.number().int().min(500).max(50000).optional().describe("Maximum characters to return."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ messageId, maxChars = 30000 }) => {
+  async ({ messageId, maxChars = 30000, mailbox }) => {
     const c = await getConnector();
-    const m = await c.getMessage(messageId);
+    const m = await c.getMessage(messageId, { mailbox });
     if (!m) return { content: [{ type: "text", text: "Message not found." }] };
     const bodyText = (m.body ?? "").replace(/<[^>]+>/g, "");
     const clippedBody = bodyText.length <= maxChars ? bodyText : `${bodyText.slice(0, maxChars)}\n\n[truncated ${bodyText.length - maxChars} characters]`;
@@ -72,15 +103,17 @@ server.registerTool(
 server.registerTool(
   "search_messages",
   {
-    description: "Search Microsoft 365 mailbox messages by free text query.",
+    description: "Search Microsoft 365 mailbox messages by free text query. Optionally scope to a specific folder or shared mailbox.",
     inputSchema: {
       query: z.string().min(2).describe("Free text query to search in the mailbox."),
-      top: z.number().int().min(1).max(25).optional().describe("Max number of messages to return.")
+      top: z.number().int().min(1).max(25).optional().describe("Max number of messages to return."),
+      folder: z.string().optional().describe("Mail folder ID or well-known name to scope search (inbox, drafts, sentitems, deleteditems)."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ query, top }) => {
+  async ({ query, top, folder, mailbox }) => {
     const c = await getConnector();
-    const messages = await c.searchMessages(query, { top });
+    const messages = await c.searchMessages(query, { top, folder, mailbox });
     return {
       content: [{ type: "text", text: JSON.stringify({ query, messages }, null, 2) }]
     };
@@ -92,12 +125,13 @@ server.registerTool(
   {
     description: "List file attachments on an email message.",
     inputSchema: {
-      messageId: z.string().describe("Message ID from search_messages, list_inbox, or get_message.")
+      messageId: z.string().describe("Message ID from search_messages, list_inbox, or get_message."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ messageId }) => {
+  async ({ messageId, mailbox }) => {
     const c = await getConnector();
-    const attachments = await c.listMessageAttachments(messageId);
+    const attachments = await c.listMessageAttachments(messageId, { mailbox });
     return {
       content: [{ type: "text", text: JSON.stringify({ messageId, attachments }, null, 2) }]
     };
@@ -111,12 +145,13 @@ server.registerTool(
     inputSchema: {
       messageId: z.string().describe("Message ID."),
       attachmentId: z.string().describe("Attachment ID from list_message_attachments."),
-      maxChars: z.number().int().min(500).max(50000).optional().describe("Maximum characters to return.")
+      maxChars: z.number().int().min(500).max(50000).optional().describe("Maximum characters to return."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ messageId, attachmentId, maxChars = 50000 }) => {
+  async ({ messageId, attachmentId, maxChars = 50000, mailbox }) => {
     const c = await getConnector();
-    const attachment = await c.getMessageAttachment(messageId, attachmentId);
+    const attachment = await c.getMessageAttachment(messageId, attachmentId, { mailbox });
     if (!attachment?.contentBytes) {
       return {
         content: [{ type: "text", text: JSON.stringify({ messageId, attachmentId, error: "Attachment content unavailable." }, null, 2) }]
@@ -161,12 +196,13 @@ server.registerTool(
     inputSchema: {
       messageId: z.string(),
       body: z.string().describe("HTML or plain text body for the reply."),
-      replyAll: z.boolean().optional().describe("Reply to all recipients.")
+      replyAll: z.boolean().optional().describe("Reply to all recipients."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ messageId, body, replyAll }) => {
+  async ({ messageId, body, replyAll, mailbox }) => {
     const c = await getConnector();
-    const result = await c.draftReply(messageId, body, { replyAll });
+    const result = await c.draftReply(messageId, body, { replyAll, mailbox });
     if (!result) return { content: [{ type: "text", text: "Failed to create draft." }] };
     return { content: [{ type: "text", text: `Draft created (id: ${result.draftId}). Open Outlook to edit or send.` }] };
   }
@@ -180,12 +216,13 @@ server.registerTool(
       to: z.array(z.string()).min(1).describe("Recipient email addresses."),
       subject: z.string(),
       body: z.string().describe("HTML or plain text body."),
-      cc: z.array(z.string()).optional()
+      cc: z.array(z.string()).optional(),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox to send from. Omit for the authenticated user.")
     }
   },
-  async ({ to, subject, body, cc }) => {
+  async ({ to, subject, body, cc, mailbox }) => {
     const c = await getConnector();
-    const result = await c.sendMessage({ to, subject, body, cc });
+    const result = await c.sendMessage({ to, subject, body, cc, mailbox });
     return {
       content: [{ type: "text", text: result.sent ? `Email sent to ${to.join(", ")}.` : "Send failed or denied by policy." }]
     };
@@ -198,12 +235,13 @@ server.registerTool(
     description: "List calendar events in a date range (Microsoft 365).",
     inputSchema: {
       start: z.string().describe("Start date-time ISO string (e.g. 2025-03-20T00:00:00Z)."),
-      end: z.string().describe("End date-time ISO string.")
+      end: z.string().describe("End date-time ISO string."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ start, end }) => {
+  async ({ start, end, mailbox }) => {
     const c = await getConnector();
-    const events = await c.listCalendarEvents({ start, end });
+    const events = await c.listCalendarEvents({ start, end, mailbox });
     const text = events.length === 0
       ? "No events in range."
       : events.map((e, i) => `${i + 1}. ${e.subject} | ${e.start} - ${e.end} | ${e.location ?? ""}`).join("\n");
@@ -221,12 +259,13 @@ server.registerTool(
       end: z.string().describe("End date-time ISO string."),
       body: z.string().optional(),
       location: z.string().optional(),
-      attendees: z.array(z.string()).optional().describe("Email addresses of attendees.")
+      attendees: z.array(z.string()).optional().describe("Email addresses of attendees."),
+      mailbox: z.string().optional().describe("Email address of a shared mailbox. Omit for the authenticated user.")
     }
   },
-  async ({ subject, start, end, body, location, attendees }) => {
+  async ({ subject, start, end, body, location, attendees, mailbox }) => {
     const c = await getConnector();
-    const result = await c.createCalendarEvent({ subject, start, end, body, location, attendees });
+    const result = await c.createCalendarEvent({ subject, start, end, body, location, attendees, mailbox });
     if (!result) return { content: [{ type: "text", text: "Failed to create event." }] };
     return { content: [{ type: "text", text: `Event created (id: ${result.id}).` }] };
   }
