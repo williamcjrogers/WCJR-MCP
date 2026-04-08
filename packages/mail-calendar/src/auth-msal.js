@@ -134,3 +134,92 @@ export async function createTokenProviderFromConfig(configPath) {
   }
   throw new Error("Config must include refreshToken or tokenCachePath");
 }
+
+/**
+ * Resolve the refresh token for a single account entry.
+ * Checks env var WCJR_MAIL_RT_{NAME} first, then plaintext refreshToken field.
+ */
+function resolveAccountRefreshToken(acctConfig, accountName) {
+  const envKey = `WCJR_MAIL_RT_${accountName.toUpperCase()}`;
+  const fromEnv = process.env[envKey]?.trim();
+  if (fromEnv) return fromEnv;
+  if (typeof acctConfig.refreshToken === "string" && acctConfig.refreshToken.trim()) {
+    return acctConfig.refreshToken.trim();
+  }
+  return "";
+}
+
+/**
+ * Create a map of { accountName -> getAccessToken } from a multi-account config file.
+ * Handles both old (single-account) and new (multi-account) config formats.
+ * @param { string } configPath
+ * @returns { Promise<{ providers: Record<string, () => Promise<string>>, defaultAccount: string, accounts: Record<string, { label: string }> }> }
+ */
+export async function createTokenProvidersFromConfig(configPath) {
+  const raw = await fs.readFile(configPath, "utf-8");
+  const config = JSON.parse(raw);
+
+  // Old format: single account with top-level clientId
+  if (config.clientId) {
+    const provider = await createSingleProviderFromAccount(config, "default", configPath);
+    return {
+      providers: { default: provider },
+      defaultAccount: "default",
+      accounts: { default: { label: "Default" } }
+    };
+  }
+
+  // New format: multi-account
+  const providers = {};
+  const accountsMeta = {};
+  for (const [name, acct] of Object.entries(config.accounts ?? {})) {
+    try {
+      providers[name] = await createSingleProviderFromAccount(acct, name, configPath);
+      accountsMeta[name] = { label: acct.label ?? name };
+    } catch (err) {
+      // Log but don't block other accounts from loading
+      console.error(`[mail-calendar] Failed to initialise account "${name}": ${err.message}`);
+      accountsMeta[name] = { label: acct.label ?? name, error: err.message };
+    }
+  }
+  const defaultAccount = config.defaultAccount ?? Object.keys(providers)[0] ?? "default";
+  return { providers, defaultAccount, accounts: accountsMeta };
+}
+
+/**
+ * Build a token provider for a single account entry.
+ */
+async function createSingleProviderFromAccount(acctConfig, accountName, configPath) {
+  const { clientId, tenantId, encryptedRefreshToken, tokenCachePath } = acctConfig;
+  if (!clientId || !tenantId) {
+    throw new Error(`Account "${accountName}" must include clientId and tenantId`);
+  }
+
+  // 1. Check runtime env var (injected by desktop app) or plaintext refreshToken
+  const refreshToken = resolveAccountRefreshToken(acctConfig, accountName);
+  if (refreshToken) {
+    return createRefreshTokenProvider(clientId, tenantId, refreshToken);
+  }
+
+  // 2. Legacy single-account env var (backward compat for old format)
+  if (accountName === "default") {
+    const legacy = process.env.WCJR_MAIL_REFRESH_TOKEN?.trim();
+    if (legacy) {
+      return createRefreshTokenProvider(clientId, tenantId, legacy);
+    }
+  }
+
+  // 3. Encrypted token requires desktop app injection
+  if (encryptedRefreshToken) {
+    throw new Error(
+      `Account "${accountName}" has an encrypted refresh token. Start the server via the desktop app so it can inject WCJR_MAIL_RT_${accountName.toUpperCase()}.`
+    );
+  }
+
+  // 4. Token cache file
+  if (tokenCachePath) {
+    return createTokenProvider({ clientId, tenantId, tokenCachePath: path.resolve(path.dirname(configPath), tokenCachePath) });
+  }
+
+  throw new Error(`Account "${accountName}" must include refreshToken or tokenCachePath`);
+}

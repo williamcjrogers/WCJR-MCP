@@ -1336,16 +1336,17 @@ function readMailCalendarConfigSync() {
   }
 }
 
-function getMailCalendarRefreshToken(config = readMailCalendarConfigSync()) {
-  if (!config) {
-    return "";
+/**
+ * Extract a refresh token (plaintext or encrypted) from a single account entry.
+ */
+function resolveRefreshTokenFromEntry(entry) {
+  if (!entry) return "";
+  if (typeof entry.refreshToken === "string" && entry.refreshToken.trim()) {
+    return entry.refreshToken.trim();
   }
-  if (typeof config.refreshToken === "string" && config.refreshToken.trim()) {
-    return config.refreshToken.trim();
-  }
-  if (typeof config.encryptedRefreshToken === "string" && config.encryptedRefreshToken.trim()) {
+  if (typeof entry.encryptedRefreshToken === "string" && entry.encryptedRefreshToken.trim()) {
     try {
-      return decryptKey(config.encryptedRefreshToken.trim());
+      return decryptKey(entry.encryptedRefreshToken.trim());
     } catch {
       return "";
     }
@@ -1353,35 +1354,101 @@ function getMailCalendarRefreshToken(config = readMailCalendarConfigSync()) {
   return "";
 }
 
-function buildMailCalendarServerEnv() {
-  const refreshToken = getMailCalendarRefreshToken();
-  if (!refreshToken) {
-    return undefined;
-  }
-  return {
-    ...process.env,
-    WCJR_MAIL_REFRESH_TOKEN: refreshToken
-  };
+function getMailCalendarRefreshToken(config = readMailCalendarConfigSync()) {
+  if (!config) return "";
+  // Old single-account format
+  return resolveRefreshTokenFromEntry(config);
 }
 
-async function writeMailCalendarConfig({ clientId, tenantId, refreshToken }) {
+function buildMailCalendarServerEnv() {
+  const config = readMailCalendarConfigSync();
+  if (!config) return undefined;
+
+  const env = { ...process.env };
+  let hasAny = false;
+
+  if (config.clientId) {
+    // Old single-account format — inject both legacy and new env vars
+    const rt = resolveRefreshTokenFromEntry(config);
+    if (rt) {
+      env.WCJR_MAIL_REFRESH_TOKEN = rt;
+      env.WCJR_MAIL_RT_DEFAULT = rt;
+      hasAny = true;
+    }
+  } else if (config.accounts) {
+    // New multi-account format
+    for (const [name, acct] of Object.entries(config.accounts)) {
+      const rt = resolveRefreshTokenFromEntry(acct);
+      if (rt) {
+        env[`WCJR_MAIL_RT_${name.toUpperCase()}`] = rt;
+        hasAny = true;
+      }
+    }
+  }
+
+  return hasAny ? env : undefined;
+}
+
+/**
+ * Write or update a single account in the mail-calendar config.
+ * @param {{ clientId: string, tenantId: string, refreshToken: string, accountName?: string, label?: string }} opts
+ */
+async function writeMailCalendarConfig({ clientId, tenantId, refreshToken, accountName, label }) {
   const configPathValue = mailCalendarConfigPath();
   await fs.mkdir(path.dirname(configPathValue), { recursive: true });
-  const baseConfig = { clientId, tenantId };
-  const serialized = isLocalEncryptionAvailable()
-    ? {
-        ...baseConfig,
-        encryptedRefreshToken: encryptKey(refreshToken)
-      }
-    : {
-        ...baseConfig,
-        refreshToken
+
+  const encryptedToken = isLocalEncryptionAvailable();
+  const tokenField = encryptedToken
+    ? { encryptedRefreshToken: encryptKey(refreshToken) }
+    : { refreshToken };
+
+  // Read existing config to decide format
+  let existing = readMailCalendarConfigSync();
+
+  // If no accountName provided, use legacy single-account format for backward compat
+  if (!accountName) {
+    const serialized = { clientId, tenantId, ...tokenField };
+    await fs.writeFile(configPathValue, JSON.stringify(serialized, null, 2), "utf-8");
+    return;
+  }
+
+  // Multi-account format
+  if (!existing || existing.clientId) {
+    // Migrate old format to new if needed
+    if (existing?.clientId) {
+      const oldToken = resolveRefreshTokenFromEntry(existing);
+      const oldTokenField = encryptedToken && oldToken
+        ? { encryptedRefreshToken: encryptKey(oldToken) }
+        : oldToken ? { refreshToken: oldToken } : {};
+      existing = {
+        accounts: {
+          default: {
+            label: "Default",
+            clientId: existing.clientId,
+            tenantId: existing.tenantId,
+            ...oldTokenField
+          }
+        },
+        defaultAccount: "default"
       };
-  await fs.writeFile(
-    configPathValue,
-    JSON.stringify(serialized, null, 2),
-    "utf-8"
-  );
+    } else {
+      existing = { accounts: {}, defaultAccount: accountName };
+    }
+  }
+
+  if (!existing.accounts) existing.accounts = {};
+  existing.accounts[accountName] = {
+    label: label ?? accountName,
+    clientId,
+    tenantId,
+    ...tokenField
+  };
+  // If this is the first account, set it as default
+  if (!existing.defaultAccount) {
+    existing.defaultAccount = accountName;
+  }
+
+  await fs.writeFile(configPathValue, JSON.stringify(existing, null, 2), "utf-8");
 }
 
 async function migrateMailCalendarConfig() {
@@ -3315,9 +3382,11 @@ function registerIpcHandlers() {
   ipcMain.handle("assistant:runMicrosoft365DeviceCode", async (_event, payload) => {
     const schema = z.object({
       clientId: z.string().min(1),
-      tenantId: z.string().min(1)
+      tenantId: z.string().min(1),
+      accountName: z.string().min(1).optional(),
+      label: z.string().optional()
     });
-    const { clientId, tenantId } = schema.parse(payload);
+    const { clientId, tenantId, accountName, label } = schema.parse(payload);
     try {
       const { runDeviceCodeFlow } = await import("@wcjr/mail-calendar");
       const { refreshToken } = await runDeviceCodeFlow({
@@ -3329,7 +3398,7 @@ function registerIpcHandlers() {
           }
         }
       });
-      await writeMailCalendarConfig({ clientId, tenantId, refreshToken });
+      await writeMailCalendarConfig({ clientId, tenantId, refreshToken, accountName, label });
       return { success: true };
     } catch (err) {
       return { success: false, error: err.message ?? String(err) };
@@ -3363,7 +3432,18 @@ function registerIpcHandlers() {
 
   ipcMain.handle("assistant:hasMailCalendarConfig", async () => {
     const config = readMailCalendarConfigSync();
-    return !!(config?.clientId && config?.tenantId && getMailCalendarRefreshToken(config));
+    if (!config) return false;
+    // Old single-account format
+    if (config.clientId && config.tenantId) {
+      return !!getMailCalendarRefreshToken(config);
+    }
+    // New multi-account format — true if at least one account has a token
+    if (config.accounts) {
+      return Object.values(config.accounts).some(
+        (acct) => acct.clientId && acct.tenantId && resolveRefreshTokenFromEntry(acct)
+      );
+    }
+    return false;
   });
 
   ipcMain.handle("assistant:setTheme", async (_event, themeId) => {
