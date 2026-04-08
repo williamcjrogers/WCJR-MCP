@@ -31,7 +31,14 @@ export function chunkDocument(text, meta = {}, opts = {}) {
     custodian: meta.custodian ?? "",
     assessmentWindow: meta.assessmentWindow ?? "",
     headingPath: meta.headingPath ?? "",
-    dateRange: meta.dateRange ?? ""
+    dateRange: meta.dateRange ?? "",
+    emailFrom: meta.emailFrom ?? "",
+    emailTo: meta.emailTo ?? "",
+    emailCc: meta.emailCc ?? "",
+    emailDate: meta.emailDate ?? "",
+    emailSubject: meta.emailSubject ?? "",
+    emailFolder: meta.emailFolder ?? "",
+    threadId: meta.threadId ?? ""
   }));
 }
 

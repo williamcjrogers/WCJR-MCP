@@ -18,7 +18,7 @@ export async function ensureCollection(name) {
     vectors: { size: VECTOR_SIZE, distance: "Cosine" }
   });
 
-  const indexFields = ["source", "documentType", "matter", "custodian", "assessmentWindow"];
+  const indexFields = ["source", "documentType", "matter", "custodian", "assessmentWindow", "emailFrom", "emailTo", "emailDate", "threadId"];
   for (const field_name of indexFields) {
     await qdrant.createPayloadIndex(name, {
       field_name,
@@ -33,9 +33,16 @@ export async function ensureCollection(name) {
  * @param {Array<{id: string, text: string, source: string, section?: string, page?: number, documentType?: string, chunkIndex?: number}>} chunks
  * @returns {Promise<number>} Number of points upserted.
  */
-export async function ingest(collection, chunks) {
+export async function ingest(collection, chunks, { batchSize = 50 } = {}) {
   const texts = chunks.map((c) => c.text);
-  const embeddings = await embed(texts);
+
+  // Batch embedding calls
+  const embeddings = [];
+  for (let i = 0; i < texts.length; i += batchSize) {
+    const batch = texts.slice(i, i + batchSize);
+    const batchEmbeddings = await embed(batch);
+    embeddings.push(...batchEmbeddings);
+  }
 
   const points = chunks.map((chunk, i) => ({
     id: chunk.id,
@@ -51,7 +58,14 @@ export async function ingest(collection, chunks) {
       custodian: chunk.custodian ?? "",
       assessmentWindow: chunk.assessmentWindow ?? "",
       headingPath: chunk.headingPath ?? "",
-      dateRange: chunk.dateRange ?? ""
+      dateRange: chunk.dateRange ?? "",
+      emailFrom: chunk.emailFrom ?? "",
+      emailTo: chunk.emailTo ?? "",
+      emailCc: chunk.emailCc ?? "",
+      emailDate: chunk.emailDate ?? "",
+      emailSubject: chunk.emailSubject ?? "",
+      emailFolder: chunk.emailFolder ?? "",
+      threadId: chunk.threadId ?? ""
     }
   }));
 
@@ -91,7 +105,14 @@ export async function search(collection, query, { limit = 5, filter } = {}) {
     matter: p.payload.matter ?? "",
     custodian: p.payload.custodian ?? "",
     assessmentWindow: p.payload.assessmentWindow ?? "",
-    headingPath: p.payload.headingPath ?? ""
+    headingPath: p.payload.headingPath ?? "",
+    emailFrom: p.payload.emailFrom ?? "",
+    emailTo: p.payload.emailTo ?? "",
+    emailCc: p.payload.emailCc ?? "",
+    emailDate: p.payload.emailDate ?? "",
+    emailSubject: p.payload.emailSubject ?? "",
+    emailFolder: p.payload.emailFolder ?? "",
+    threadId: p.payload.threadId ?? ""
   }));
 }
 
