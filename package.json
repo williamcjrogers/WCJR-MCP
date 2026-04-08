@@ -17,6 +17,7 @@
     "@wcjr/browser-ops": "0.1.0",
     "@wcjr/conversation-store": "0.1.0",
     "@wcjr/desktop-commander": "0.1.0",
+    "@wcjr/docx-engine-mcp": "0.1.0",
     "@wcjr/document-ops": "0.1.0",
     "@wcjr/file-ops": "0.1.0",
     "@wcjr/filesystem-mcp": "0.1.0",
@@ -29,7 +30,10 @@
     "@wcjr/orchestrator": "0.1.0",
     "@wcjr/policy-engine": "0.1.0",
     "@wcjr/providers": "0.1.0",
+    "@wcjr/qdrant-rag-mcp": "0.1.0",
+    "@wcjr/rag": "0.1.0",
     "@wcjr/task-store": "0.1.0",
+    "@qdrant/js-client-rest": "^1.17.0",
     "openai": "^4.96.0",
     "xlsx": "^0.18.5",
     "zod": "^3.24.1"
