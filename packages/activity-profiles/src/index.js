@@ -70,6 +70,26 @@ const MCP_PRESET_REGISTRY = {
     id: "sequential-thinking",
     label: "Sequential Thinking",
     serverNamePatterns: ["sequential", "thinking"]
+  },
+  xlsxEngine: {
+    id: "xlsx-engine",
+    label: "Excel Engine",
+    kind: "builtin-xlsx-engine"
+  },
+  docxEngine: {
+    id: "docx-engine",
+    label: "Document Engine",
+    kind: "builtin-docx-engine"
+  },
+  qdrantRag: {
+    id: "qdrant-rag",
+    label: "Knowledge & RAG",
+    kind: "builtin-qdrant-rag"
+  },
+  lookeen: {
+    id: "lookeen",
+    label: "Lookeen Search",
+    serverNamePatterns: ["lookeen"]
   }
 };
 
@@ -122,7 +142,7 @@ export const ACTIVITY_PROFILES = {
     defaultModel: "gemini-3.1-pro-preview-customtools",
     suggestedTaskType: "documents",
     description: "Review packs, amend drafts, compare versions, and produce business-ready documents.",
-    mcpPresets: ["documents", "filesystem", "memory", "context7"],
+    mcpPresets: ["documents", "filesystem", "memory", "context7", "xlsxEngine", "docxEngine", "qdrantRag"],
     recommendedSkills: ["document-review", "brainstorming"],
     specialistAgents: [
       "Outliner",
@@ -152,7 +172,7 @@ export const ACTIVITY_PROFILES = {
     defaultModel: "gpt-5.4-pro",
     suggestedTaskType: "data_analysis",
     description: "Inspect structured data, spreadsheets, and outputs with a reproducible reasoning path.",
-    mcpPresets: ["filesystem", "documents", "memory", "sequentialThinking"],
+    mcpPresets: ["filesystem", "documents", "memory", "sequentialThinking", "builtin-shell-exec", "xlsxEngine"],
     recommendedSkills: ["document-review"],
     specialistAgents: [
       "DataProfiler",
@@ -201,6 +221,23 @@ export const ACTIVITY_PROFILES = {
     specialistAgents: [
       "IdeaGenerator",
       "ConceptShaper",
+      "Synthesizer"
+    ]
+  },
+  disputes: {
+    id: "disputes",
+    label: "Disputes & Forensic",
+    defaultModel: "gpt-5.4-pro",
+    suggestedTaskType: "complex",
+    description:
+      "Forensic document production, quantum analysis, delay analysis, contract review, and evidence management for construction disputes.",
+    mcpPresets: ["filesystem", "fileOps", "memory", "xlsxEngine", "docxEngine", "qdrantRag", "lookeen", "documents"],
+    recommendedSkills: ["document-review", "brainstorming"],
+    specialistAgents: [
+      "Analyst",
+      "DraftWriter",
+      "DataProfiler",
+      "DocumentReviewer",
       "Synthesizer"
     ]
   },
