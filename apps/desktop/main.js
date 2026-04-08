@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
 import { spawn } from "node:child_process";
+import http from "node:http";
 import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +63,11 @@ const DEFAULT_CONFIG = {
     enabled: false,
     channel: "telegram",
     botToken: "",
-    allowedChatIds: []
+    allowedChatIds: [],
+    wahaUrl: "http://localhost:3000",
+    wahaApiKey: "",
+    wahaHmacSecret: "",
+    wahaSession: "default"
   },
   desktopCommander: {
     enabled: true,
@@ -87,7 +92,7 @@ const DEFAULT_CONFIG = {
 
 const PROFILE_TASK_TYPES = new Set(ACTIVITY_ORDER);
 const MODEL_TIER_KEYS = ["quick", "standard", "forensic"];
-const PREFERRED_PROFILE_PROVIDERS = new Set(["openai", "grok", "gemini"]);
+const PREFERRED_PROFILE_PROVIDERS = new Set(["openai", "grok", "gemini", "anthropic", "perplexity", "ollama"]);
 
 function isSelectableModelId(modelId) {
   const providerId = resolveProvider(modelId);
@@ -114,9 +119,6 @@ function sanitizeModelList(models = []) {
 function sanitizeModelCache(modelCache = {}) {
   const next = {};
   for (const [providerId, models] of Object.entries(modelCache ?? {})) {
-    if (providerId === "anthropic") {
-      continue;
-    }
     const filtered = sanitizeModelList(models);
     if (filtered.length) {
       next[providerId] = filtered;
@@ -171,6 +173,7 @@ let messagingBridge;
 let configSaveQueue = Promise.resolve();
 // chatId (number) → { taskId, conversationId } for plan approval via Telegram
 const pendingTelegramPlans = new Map();
+let _approvePlanImpl = async () => { throw new Error("approvePlan not yet initialized"); };
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 const startupLogPath = path.join(
@@ -185,13 +188,25 @@ if (!gotSingleInstanceLock) {
 const MCP_SERVER_SCHEMA = z.object({
   name: z.string().min(1),
   enabled: z.boolean().optional().default(true),
-  kind: z.enum(["builtin-filesystem", "builtin-document-ops", "builtin-file-ops", "builtin-mail-calendar", "builtin-browser-ops", "builtin-memory", "builtin-desktop-commander", "builtin-shell-exec", "builtin-git-ops", "custom"]).optional().default("custom"),
+  kind: z.enum([
+    "builtin-filesystem", "builtin-document-ops", "builtin-file-ops", "builtin-mail-calendar",
+    "builtin-browser-ops", "builtin-memory", "builtin-desktop-commander", "builtin-shell-exec",
+    "builtin-git-ops", "builtin-qdrant-rag", "builtin-xlsx-engine", "builtin-docx-engine",
+    "catalog-brave-search", "catalog-github", "catalog-notion", "catalog-slack",
+    "catalog-stripe", "catalog-supabase", "catalog-neon", "catalog-cloudflare", "catalog-vercel",
+    "catalog-mongodb", "catalog-asana", "catalog-playwright", "catalog-home-assistant",
+    "catalog-aws", "catalog-sentry", "catalog-docker", "catalog-tavily", "catalog-exa",
+    "catalog-context7", "catalog-firecrawl", "catalog-linear", "catalog-todoist", "catalog-jira",
+    "catalog-huggingface", "catalog-sequential-thinking",
+    "custom"
+  ]).optional().default("custom"),
   transport: z.enum(["stdio", "streamable-http"]).optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
   url: z.string().optional(),
+  authToken: z.string().optional(),
   rootPath: z.string().optional(),
   roots: z.array(z.string()).optional(),
   allowAnyPath: z.boolean().optional()
@@ -692,6 +707,33 @@ function hydrateMcpServer(server) {
       ...builtinServerProcessConfig("desktop-commander", ["--config", desktopCommanderConfigPath()])
     };
   }
+  if (server.kind === "builtin-qdrant-rag") {
+    return {
+      name: server.name || "Qdrant RAG",
+      enabled: server.enabled !== false,
+      kind: "builtin-qdrant-rag",
+      transport: "stdio",
+      ...builtinServerProcessConfig("qdrant-rag-mcp")
+    };
+  }
+  if (server.kind === "builtin-xlsx-engine") {
+    return {
+      name: server.name || "Excel Engine",
+      enabled: server.enabled !== false,
+      kind: "builtin-xlsx-engine",
+      transport: "stdio",
+      ...builtinServerProcessConfig("xlsx-engine-mcp")
+    };
+  }
+  if (server.kind === "builtin-docx-engine") {
+    return {
+      name: server.name || "Document Engine",
+      enabled: server.enabled !== false,
+      kind: "builtin-docx-engine",
+      transport: "stdio",
+      ...builtinServerProcessConfig("docx-engine-mcp")
+    };
+  }
 
   return {
     enabled: server.enabled !== false,
@@ -766,6 +808,27 @@ function dehydrateMcpServer(server) {
       kind: "builtin-desktop-commander"
     };
   }
+  if (server.kind === "builtin-qdrant-rag") {
+    return {
+      name: server.name,
+      enabled: server.enabled !== false,
+      kind: "builtin-qdrant-rag"
+    };
+  }
+  if (server.kind === "builtin-xlsx-engine") {
+    return {
+      name: server.name,
+      enabled: server.enabled !== false,
+      kind: "builtin-xlsx-engine"
+    };
+  }
+  if (server.kind === "builtin-docx-engine") {
+    return {
+      name: server.name,
+      enabled: server.enabled !== false,
+      kind: "builtin-docx-engine"
+    };
+  }
 
   return {
     name: server.name,
@@ -774,7 +837,9 @@ function dehydrateMcpServer(server) {
     transport: server.transport,
     command: server.command,
     args: server.args ?? [],
-    url: server.url
+    env: server.env,
+    url: server.url,
+    authToken: server.authToken
   };
 }
 
@@ -884,12 +949,231 @@ function getDefaultMcpServers() {
     {
       name: "Shell / Terminal",
       kind: "builtin-shell-exec",
-      enabled: false
+      enabled: true
     },
     {
       name: "Git Operations",
       kind: "builtin-git-ops",
       enabled: false
+    },
+    {
+      name: "Qdrant RAG",
+      kind: "builtin-qdrant-rag",
+      enabled: false
+    },
+    {
+      name: "Excel Engine",
+      kind: "builtin-xlsx-engine",
+      enabled: true
+    },
+    {
+      name: "Document Engine",
+      kind: "builtin-docx-engine",
+      enabled: true
+    },
+    // --- MCP Catalog: Tier 1 — Official first-party servers ---
+    {
+      name: "GitHub",
+      kind: "catalog-github",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://api.githubcopilot.com/mcp/"
+    },
+    {
+      name: "Notion",
+      kind: "catalog-notion",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.notion.com/mcp"
+    },
+    {
+      name: "Slack",
+      kind: "catalog-slack",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.slack.com"
+    },
+    {
+      name: "Stripe",
+      kind: "catalog-stripe",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@stripe/mcp"],
+      env: { STRIPE_SECRET_KEY: "" }
+    },
+    {
+      name: "Supabase",
+      kind: "catalog-supabase",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.supabase.com/mcp"
+    },
+    {
+      name: "Neon",
+      kind: "catalog-neon",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.neon.tech/mcp"
+    },
+    {
+      name: "Cloudflare",
+      kind: "catalog-cloudflare",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.cloudflare.com/mcp"
+    },
+    {
+      name: "Vercel",
+      kind: "catalog-vercel",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.vercel.com"
+    },
+    {
+      name: "MongoDB",
+      kind: "catalog-mongodb",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "mongodb-mcp-server"],
+      env: { MDB_MCP_CONNECTION_STRING: "" }
+    },
+    {
+      name: "Asana",
+      kind: "catalog-asana",
+      enabled: false,
+      transport: "streamable-http",
+      url: "https://mcp.asana.com/sse"
+    },
+    {
+      name: "Playwright",
+      kind: "catalog-playwright",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@playwright/mcp"]
+    },
+    {
+      name: "Home Assistant",
+      kind: "catalog-home-assistant",
+      enabled: false,
+      transport: "streamable-http",
+      url: "http://homeassistant.local:8123/api/mcp"
+    },
+    {
+      name: "AWS",
+      kind: "catalog-aws",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@awslabs/mcp-server-aws-api"]
+    },
+    {
+      name: "Sentry",
+      kind: "catalog-sentry",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@sentry/mcp-server"],
+      env: { SENTRY_AUTH_TOKEN: "" }
+    },
+    {
+      name: "Docker",
+      kind: "catalog-docker",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "mcp-server-docker"]
+    },
+    // --- MCP Catalog: Tier 2 — High-quality community servers ---
+    {
+      name: "Brave Search",
+      kind: "catalog-brave-search",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@brave/brave-search-mcp-server"],
+      env: { BRAVE_API_KEY: "" }
+    },
+    {
+      name: "Tavily",
+      kind: "catalog-tavily",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "tavily-mcp"],
+      env: { TAVILY_API_KEY: "" }
+    },
+    {
+      name: "Exa",
+      kind: "catalog-exa",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "exa-mcp-server"],
+      env: { EXA_API_KEY: "" }
+    },
+    {
+      name: "Context7",
+      kind: "catalog-context7",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@upstash/context7-mcp"]
+    },
+    {
+      name: "Firecrawl",
+      kind: "catalog-firecrawl",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "firecrawl-mcp"],
+      env: { FIRECRAWL_API_KEY: "" }
+    },
+    {
+      name: "Linear",
+      kind: "catalog-linear",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@tacticlaunch/mcp-linear"],
+      env: { LINEAR_API_KEY: "" }
+    },
+    {
+      name: "Todoist",
+      kind: "catalog-todoist",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "todoist-mcp"],
+      env: { TODOIST_API_KEY: "" }
+    },
+    {
+      name: "Jira",
+      kind: "catalog-jira",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@orengrinker/jira-mcp-server"],
+      env: { JIRA_API_TOKEN: "", JIRA_BASE_URL: "", JIRA_EMAIL: "" }
+    },
+    {
+      name: "Hugging Face",
+      kind: "catalog-huggingface",
+      enabled: false,
+      transport: "stdio",
+      command: "uvx",
+      args: ["huggingface-mcp-server"],
+      env: { HF_TOKEN: "" }
+    },
+    {
+      name: "Sequential Thinking",
+      kind: "catalog-sequential-thinking",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-sequential-thinking"]
     }
   ];
 }
@@ -995,20 +1279,30 @@ function getMessagingBotToken(messaging = {}) {
 }
 
 function hydrateMessagingConfig(messaging = {}) {
+  const channel = ["telegram", "whatsapp", "stub"].includes(messaging?.channel) ? messaging.channel : DEFAULT_CONFIG.messaging.channel;
   return {
     ...DEFAULT_CONFIG.messaging,
     enabled: messaging?.enabled === true,
-    channel: messaging?.channel === "stub" ? "stub" : DEFAULT_CONFIG.messaging.channel,
+    channel,
     allowedChatIds: normalizeAllowedChatIds(messaging?.allowedChatIds),
-    botToken: getMessagingBotToken(messaging)
+    botToken: getMessagingBotToken(messaging),
+    wahaUrl: messaging?.wahaUrl || DEFAULT_CONFIG.messaging.wahaUrl,
+    wahaApiKey: messaging?.wahaApiKey || DEFAULT_CONFIG.messaging.wahaApiKey,
+    wahaHmacSecret: messaging?.wahaHmacSecret || DEFAULT_CONFIG.messaging.wahaHmacSecret,
+    wahaSession: messaging?.wahaSession || DEFAULT_CONFIG.messaging.wahaSession
   };
 }
 
 function serializeMessagingConfig(messaging = {}) {
+  const channel = ["telegram", "whatsapp", "stub"].includes(messaging?.channel) ? messaging.channel : DEFAULT_CONFIG.messaging.channel;
   const serialized = {
     enabled: messaging?.enabled === true,
-    channel: messaging?.channel === "stub" ? "stub" : DEFAULT_CONFIG.messaging.channel,
-    allowedChatIds: normalizeAllowedChatIds(messaging?.allowedChatIds)
+    channel,
+    allowedChatIds: normalizeAllowedChatIds(messaging?.allowedChatIds),
+    wahaUrl: messaging?.wahaUrl || "",
+    wahaApiKey: messaging?.wahaApiKey || "",
+    wahaHmacSecret: messaging?.wahaHmacSecret || "",
+    wahaSession: messaging?.wahaSession || "default"
   };
   const botToken = getMessagingBotToken(messaging);
   if (!botToken) {
@@ -1109,8 +1403,10 @@ function getDecryptedKey(providerId) {
   const encrypted = appConfig.apiKeys?.[providerId];
   if (!encrypted) return null;
   try {
-    return decryptKey(encrypted);
-  } catch {
+    const decrypted = decryptKey(encrypted);
+    return decrypted || null;
+  } catch (err) {
+    logStartup(`Key decryption failed for ${providerId}: ${err.message}`);
     return null;
   }
 }
@@ -1317,7 +1613,7 @@ async function invokeDirectModel({
   suppressStream = false,
   signal
 }) {
-  const apiKey = getDecryptedKey(providerId);
+  const apiKey = providerId === "ollama" ? "ollama" : getDecryptedKey(providerId);
   if (!apiKey) {
     throw new Error(`No API key configured for ${providerId}.`);
   }
@@ -1391,20 +1687,47 @@ function getTaskRemoteOrigin(taskId) {
 }
 
 async function sendTelegramTaskManagerUpdate(taskId, text) {
+  if (!messagingBridge || !String(text ?? "").trim()) return false;
+
+  // Try remote origin first (task started from messaging)
   const remoteOrigin = getTaskRemoteOrigin(taskId);
-  if (
-    !messagingBridge ||
-    remoteOrigin?.channel !== "telegram" ||
-    !remoteOrigin?.chatId ||
-    !String(text ?? "").trim()
-  ) {
-    return false;
+  if (remoteOrigin?.chatId) {
+    return messagingBridge.sendUpdate({
+      taskId,
+      chatId: remoteOrigin.chatId,
+      commandId: remoteOrigin.commandId,
+      type: "completed",
+      summary: text
+    });
   }
+
+  // For desktop-initiated tasks, push status to the first allowed chat ID
+  const messaging = appConfig?.messaging ?? {};
+  const chatIds = Array.isArray(messaging.allowedChatIds) ? messaging.allowedChatIds : [];
+  if (chatIds.length > 0) {
+    return messagingBridge.sendUpdate({
+      taskId,
+      chatId: String(chatIds[0]),
+      type: "completed",
+      summary: text
+    });
+  }
+
+  return false;
+}
+
+/**
+ * Push a short operational status update to messaging (WhatsApp/Telegram).
+ * Used for proactive notifications — not full responses.
+ */
+async function pushOpsNotification(text) {
+  if (!messagingBridge || !String(text ?? "").trim()) return false;
+  const messaging = appConfig?.messaging ?? {};
+  const chatIds = Array.isArray(messaging.allowedChatIds) ? messaging.allowedChatIds : [];
+  if (chatIds.length === 0) return false;
   return messagingBridge.sendUpdate({
-    taskId,
-    chatId: remoteOrigin.chatId,
-    commandId: remoteOrigin.commandId,
-    type: "completed",
+    chatId: String(chatIds[0]),
+    type: "progress",
     summary: text
   });
 }
@@ -1577,7 +1900,7 @@ async function invokeAgenticModel({
   signal,
   taskContext
 }) {
-  const apiKey = getDecryptedKey(providerId);
+  const apiKey = providerId === "ollama" ? "ollama" : getDecryptedKey(providerId);
   if (!apiKey) {
     throw new Error(`No API key configured for ${providerId}.`);
   }
@@ -1670,7 +1993,7 @@ async function invokeAgenticModel({
 function createOrchestrator() {
   orchestrator = new Orchestrator(appConfig, {
     resolveProvider,
-    hasApiKey: async (providerId) => !!getDecryptedKey(providerId),
+    hasApiKey: async (providerId) => providerId === "ollama" || !!getDecryptedKey(providerId),
     invokeModel: invokeAgenticModel,
     emitStatus: (text) => emitStream({ type: "status", text: `${text}\n\n` }),
     emitText: (text) => emitStream({ type: "text", text }),
@@ -1848,6 +2171,7 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
   if (mainWindow) {
     mainWindow.webContents.send("assistant:taskUpdated", { taskId: task.id, status: TASK_STATUS.RUNNING });
   }
+  pushOpsNotification(`Task started: ${compactWorkflowText(rawPrompt).slice(0, 80)}`).catch(() => {});
 
   conversationStoreRef.appendMessage(activeConversation.id, {
     role: "user",
@@ -2024,7 +2348,13 @@ function getRuntimeMetadata() {
 function buildKeyStatus() {
   const keyStatus = {};
   for (const id of PROVIDER_IDS) {
-    keyStatus[id] = !!appConfig.apiKeys?.[id];
+    if (id === "ollama") {
+      keyStatus[id] = true;
+      continue;
+    }
+    // Check if key actually decrypts, not just if encrypted blob exists
+    const decrypted = getDecryptedKey(id);
+    keyStatus[id] = !!decrypted;
   }
   return keyStatus;
 }
@@ -2153,23 +2483,15 @@ function registerIpcHandlers() {
       }
     }
     await saveConfig();
-    const keyStatus = {};
-    for (const id of PROVIDER_IDS) {
-      keyStatus[id] = !!appConfig.apiKeys?.[id];
-    }
-    return keyStatus;
+    return buildKeyStatus();
   });
 
   ipcMain.handle("assistant:getKeyStatus", async () => {
-    const keyStatus = {};
-    for (const id of PROVIDER_IDS) {
-      keyStatus[id] = !!appConfig.apiKeys?.[id];
-    }
-    return keyStatus;
+    return buildKeyStatus();
   });
 
   ipcMain.handle("assistant:listModels", async (_event, providerId) => {
-    const apiKey = getDecryptedKey(providerId);
+    const apiKey = providerId === "ollama" ? "ollama" : getDecryptedKey(providerId);
     if (!apiKey) return { error: `No API key configured for ${providerId}` };
     try {
       const adapter = getAdapter(providerId);
@@ -2191,7 +2513,7 @@ function registerIpcHandlers() {
   ipcMain.handle("assistant:listAllModels", async () => {
     const results = {};
     for (const providerId of PROVIDER_IDS) {
-      const apiKey = getDecryptedKey(providerId);
+      const apiKey = providerId === "ollama" ? "ollama" : getDecryptedKey(providerId);
       if (!apiKey) {
         results[providerId] = { models: [], error: "No API key" };
         continue;
@@ -2203,6 +2525,7 @@ function registerIpcHandlers() {
         appConfig.modelCache[providerId] = models;
         results[providerId] = { models };
       } catch (err) {
+        logStartup(`listModels failed for ${providerId}: ${err.message}`);
         results[providerId] = {
           models: sanitizeModelList(appConfig.modelCache?.[providerId] ?? []),
           error: err.message
@@ -2767,7 +3090,7 @@ function registerIpcHandlers() {
       }
       return { error: errorMsg, parentTaskId: taskId, conversationId };
     }
-  });
+  };
 
   ipcMain.handle("assistant:taskList", async (_event, filters) => {
     const store = getTaskStore();
@@ -2777,6 +3100,31 @@ function registerIpcHandlers() {
   ipcMain.handle("assistant:getTask", async (_event, taskId) => {
     const store = getTaskStore();
     return store.get(taskId);
+  });
+
+  ipcMain.handle("assistant:cancelTask", async (_event, taskId) => {
+    const store = getTaskStore();
+    const task = store.get(taskId);
+    if (task && (task.status === "running" || task.status === "pending" || task.status === "awaiting_approval")) {
+      store.update(taskId, { status: "cancelled", error: "Cancelled by user" });
+      await store.save();
+      return { ok: true };
+    }
+    return { error: "Task not cancellable" };
+  });
+
+  ipcMain.handle("assistant:clearTasks", async () => {
+    const store = getTaskStore();
+    const tasks = store.list({ limit: 500 });
+    let cleared = 0;
+    for (const task of tasks) {
+      if (task.status === "running" || task.status === "pending") {
+        store.update(task.id, { status: "cancelled", error: "Bulk cancelled" });
+        cleared++;
+      }
+    }
+    await store.save();
+    return { cleared };
   });
 
   ipcMain.handle("assistant:getAuditTrail", async (_event, filters) => {
@@ -2880,6 +3228,42 @@ function registerIpcHandlers() {
     await saveConfig();
     return { profile: getPolicyEngine().profile, approvedFolders: getPolicyEngine().approvedFolders, approvedApps: getPolicyEngine().approvedApps };
   });
+
+  ipcMain.handle("assistant:getKnowledgeCollections", async () => {
+    try {
+      const result = await orchestrator.callMcpTool("Qdrant RAG", "knowledge_list", {});
+      return JSON.parse(result?.content?.[0]?.text ?? "[]");
+    } catch (err) {
+      return { error: err.message ?? String(err) };
+    }
+  });
+
+  ipcMain.handle("assistant:ingestToKnowledge", async (_event, { source, collection, tags }) => {
+    try {
+      const result = await orchestrator.callMcpTool("Qdrant RAG", "knowledge_ingest", {
+        source,
+        collection,
+        tags: tags ?? {}
+      });
+      return JSON.parse(result?.content?.[0]?.text ?? "{}");
+    } catch (err) {
+      return { error: err.message ?? String(err) };
+    }
+  });
+
+  ipcMain.handle("assistant:deleteFromKnowledge", async (_event, { collection, source, filter, deleteEntireCollection }) => {
+    try {
+      const result = await orchestrator.callMcpTool("Qdrant RAG", "knowledge_delete", {
+        collection,
+        source,
+        filter,
+        deleteEntireCollection: deleteEntireCollection ?? false
+      });
+      return JSON.parse(result?.content?.[0]?.text ?? "{}");
+    } catch (err) {
+      return { error: err.message ?? String(err) };
+    }
+  });
 }
 
 async function startMessagingBridge() {
@@ -2897,10 +3281,23 @@ async function startMessagingBridge() {
   if (messaging.channel === "telegram" && !botToken) {
     return;
   }
-  messagingBridge = createChannel(messaging.channel, {
-    botToken,
-    allowedChatIds: normalizeAllowedChatIds(messaging.allowedChatIds)
-  });
+  if (messaging.channel === "whatsapp" && !messaging.wahaApiKey) {
+    return;
+  }
+
+  const channelConfig = messaging.channel === "whatsapp"
+    ? {
+        wahaUrl: messaging.wahaUrl || "http://localhost:3000",
+        apiKey: messaging.wahaApiKey || "",
+        hmacSecret: messaging.wahaHmacSecret || "",
+        session: messaging.wahaSession || "default",
+        allowedChatIds: normalizeAllowedChatIds(messaging.allowedChatIds)
+      }
+    : {
+        botToken,
+        allowedChatIds: normalizeAllowedChatIds(messaging.allowedChatIds)
+      };
+  messagingBridge = createChannel(messaging.channel, channelConfig);
   try {
     await messagingBridge.connect(async (cmd) => {
       logStartup(`Remote command received (${cmd.channel}:${cmd.id})`);
@@ -3104,6 +3501,128 @@ async function startMessagingBridge() {
   }
 }
 
+// ── Webhook HTTP server for WhatsApp (WAHA) and n8n triggers ───────────────
+let webhookServer = null;
+
+function startWebhookServer() {
+  const messaging = appConfig?.messaging ?? {};
+  const isWhatsApp = messaging.enabled && messaging.channel === "whatsapp";
+  const n8nEnabled = appConfig?.n8nIntegration !== false;
+
+  // Always start — serves MCP tool API for n8n, WhatsApp webhooks, and health check
+  const port = parseInt(process.env.APP_PORT ?? "4000", 10);
+
+  webhookServer = http.createServer((req, res) => {
+    let body = [];
+    req.on("data", (chunk) => body.push(chunk));
+    req.on("end", async () => {
+      const rawBody = Buffer.concat(body);
+
+      // --- WhatsApp webhook ---
+      if (req.method === "POST" && req.url === "/api/whatsapp/webhook") {
+        logStartup(`Webhook received: ${rawBody.toString().slice(0, 200)}`);
+        if (!messagingBridge?.handleWebhook) {
+          logStartup("Webhook rejected: bridge not active");
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "WhatsApp bridge not active" }));
+          return;
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(rawBody.toString());
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+          return;
+        }
+        logStartup(`Webhook event: ${parsed.event}, from: ${parsed.payload?.from ?? "?"}, body: ${(parsed.payload?.body ?? "").slice(0, 80)}`);
+        const signature = req.headers["x-webhook-hmac"] ?? "";
+        const result = messagingBridge.handleWebhook(rawBody, parsed, signature);
+        logStartup(`Webhook result: ${JSON.stringify(result.body)}`);
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+        return;
+      }
+
+      // --- n8n trigger ---
+      if (req.method === "POST" && req.url === "/api/n8n/trigger") {
+        let parsed;
+        try {
+          parsed = JSON.parse(rawBody.toString());
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+          return;
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("assistant:n8nTrigger", parsed);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // --- MCP tools listing (for n8n MCP Client Tool) ---
+      if (req.method === "GET" && req.url === "/api/mcp/tools") {
+        try {
+          const summary = orchestrator?.mcpHub?.getToolSummary?.() ?? [];
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ tools: summary }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // --- MCP tool call (for n8n MCP Client Tool) ---
+      if (req.method === "POST" && req.url === "/api/mcp/call") {
+        let parsed;
+        try {
+          parsed = JSON.parse(rawBody.toString());
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+          return;
+        }
+        const { server, tool, arguments: args } = parsed;
+        if (!server || !tool) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing server or tool" }));
+          return;
+        }
+        try {
+          const result = await orchestrator.mcpHub.callTool(server, tool, args ?? {});
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // --- Health check ---
+      if (req.method === "GET" && req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+  });
+
+  webhookServer.listen(port, () => {
+    logStartup(`Webhook HTTP server listening on port ${port}`);
+  });
+  webhookServer.on("error", (err) => {
+    logStartup("Webhook server failed to start", err);
+    webhookServer = null;
+  });
+}
+
 if (gotSingleInstanceLock) {
   app.on("second-instance", () => {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -3131,6 +3650,7 @@ if (gotSingleInstanceLock) {
     registerIpcHandlers();
     createWindow();
     await startMessagingBridge();
+    startWebhookServer();
   });
 }
 

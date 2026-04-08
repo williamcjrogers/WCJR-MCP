@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld("assistantApi", {
   setDesktopCommanderConfig: (payload) => ipcRenderer.invoke("assistant:setDesktopCommanderConfig", payload),
   taskList: (filters) => ipcRenderer.invoke("assistant:taskList", filters),
   getTask: (taskId) => ipcRenderer.invoke("assistant:getTask", taskId),
+  cancelTask: (taskId) => ipcRenderer.invoke("assistant:cancelTask", taskId),
+  clearTasks: () => ipcRenderer.invoke("assistant:clearTasks"),
   getAuditTrail: (filters) => ipcRenderer.invoke("assistant:getAuditTrail", filters),
   getPolicy: () => ipcRenderer.invoke("assistant:getPolicy"),
   setPolicy: (payload) => ipcRenderer.invoke("assistant:setPolicy", payload),
@@ -70,5 +72,13 @@ contextBridge.exposeInMainWorld("assistantApi", {
     const handler = (_event, message) => callback(message);
     ipcRenderer.on("assistant:deviceCodeMessage", handler);
     return () => ipcRenderer.removeListener("assistant:deviceCodeMessage", handler);
-  }
+  },
+  onN8nTrigger: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on("assistant:n8nTrigger", handler);
+    return () => ipcRenderer.removeListener("assistant:n8nTrigger", handler);
+  },
+  getKnowledgeCollections: () => ipcRenderer.invoke("assistant:getKnowledgeCollections"),
+  ingestToKnowledge: (payload) => ipcRenderer.invoke("assistant:ingestToKnowledge", payload),
+  deleteFromKnowledge: (payload) => ipcRenderer.invoke("assistant:deleteFromKnowledge", payload)
 });
