@@ -1504,7 +1504,7 @@ export class Orchestrator {
             messages: [
               {
                 role: "system",
-                content: [systemMessage, getAgentInstruction(activityProfile, agentName)].filter(Boolean).join("\n\n")
+                content: [systemMessage, getActivitySystemPrompt(resolvedTaskType), getAgentInstruction(activityProfile, agentName)].filter(Boolean).join("\n\n")
               },
               ...sanitizedConversationMessages,
               {
@@ -1552,7 +1552,7 @@ export class Orchestrator {
           messages: [
             {
               role: "system",
-              content: [systemMessage, getAgentInstruction(activityProfile, "Synthesizer")].filter(Boolean).join("\n\n")
+              content: [systemMessage, getActivitySystemPrompt(resolvedTaskType), getAgentInstruction(activityProfile, "Synthesizer")].filter(Boolean).join("\n\n")
             },
             ...sanitizedConversationMessages,
             {
