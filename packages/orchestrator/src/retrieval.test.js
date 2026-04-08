@@ -55,7 +55,8 @@ test("buildRetrievalContext consumes Lookeen document payloads and falls back to
       }
     ],
     mcpHub,
-    memoryItems: []
+    memoryItems: [],
+    strategy: { useLookeen: true, useFilesystem: false }
   });
 
   assert.deepEqual(calls[0], {
