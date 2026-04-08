@@ -7,6 +7,139 @@ import {
 } from "@wcjr/activity-profiles";
 import { buildRetrievalContext } from "./retrieval.js";
 
+// ── Model Council: route each specialist agent to the best provider ────────
+const SPECIALIST_MODEL_MAP = {
+  // Research — Perplexity has built-in web search
+  QuestionFramer:     { provider: "perplexity", model: "sonar-pro" },
+  ContextRetriever:   { provider: "perplexity", model: "sonar-pro" },
+
+  // Analysis — Claude has best reasoning
+  DocumentReviewer:   { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  Analyst:            { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  PolicyChecker:      { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  RiskChecker:        { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  Validator:          { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  SequentialThinker:  { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  Reviewer:           { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+  InfraReviewer:      { provider: "anthropic", model: "claude-sonnet-4-6-20250514" },
+
+  // Execution — GPT-5.4 for best tool calling
+  Implementer:        { provider: "openai", model: "gpt-5.4" },
+  Executor:           { provider: "openai", model: "gpt-5.4" },
+  ToolRunner:         { provider: "openai", model: "gpt-5.4" },
+  OutlookExecutor:    { provider: "openai", model: "gpt-5.4" },
+  ExportCoordinator:  { provider: "openai", model: "gpt-5.4" },
+
+  // Documents — Gemini for 1M context window
+  Outliner:           { provider: "gemini", model: "gemini-2.5-pro" },
+  DraftWriter:        { provider: "gemini", model: "gemini-2.5-pro" },
+
+  // Creative — Grok for diversity
+  IdeaGenerator:      { provider: "grok", model: "grok-3-beta" },
+  ConceptShaper:      { provider: "grok", model: "grok-3-beta" },
+
+  // Data — GPT-5.4 for structured analysis
+  DataProfiler:       { provider: "openai", model: "gpt-5.4" },
+
+  // Planning
+  Planner:            { provider: "openai", model: "gpt-5.4" },
+  Architect:          { provider: "openai", model: "gpt-5.4" },
+  CloudPlanner:       { provider: "openai", model: "gpt-5.4" },
+  DependencyMapper:   { provider: "openai", model: "gpt-5.4" },
+  WorkflowDesigner:   { provider: "openai", model: "gpt-5.4" },
+
+  // Triage — fast model
+  InboxTriage:        { provider: "openai", model: "gpt-5.4-mini" },
+  DraftComposer:      { provider: "openai", model: "gpt-5.4" },
+
+  // Synthesis — reliable final output
+  Synthesizer:        { provider: "openai", model: "gpt-5.4" },
+  StatusSynthesizer:  { provider: "openai", model: "gpt-5.4" },
+};
+
+// ── Task Intelligence: complexity + tool routing ──────────────────────────
+function assessTaskComplexity(prompt) {
+  const p = (prompt ?? "").toLowerCase();
+  const wordCount = p.split(/\s+/).length;
+  const hasFilePath = /[A-Za-z]:\\/.test(prompt) || /\/\w+\/\w+/.test(prompt);
+  const hasFileRef = /\.(xlsx|csv|pdf|docx|doc|txt|json)\b/i.test(prompt);
+
+  // Truly trivial: greetings, single-word commands
+  if (wordCount <= 3 && /^(hi|hello|hey|thanks|ok|yes|no|test|ping|status)\b/.test(p)) return "trivial";
+
+  // Complex: multi-step analytical work
+  if (/\b(forensic|reconcile|compare|cross.?reference|across|between|all.*and.*all|every|audit|review.*and.*amend)\b/.test(p)) return "complex";
+  if (wordCount > 50) return "complex";
+
+  // File-focused: has explicit path or file reference
+  if (hasFilePath || hasFileRef) return "file-focused";
+
+  // Research: questions that benefit from web search
+  if (/\b(what is|what are|best|recommend|latest|compare|find|research|how to|should i|options for|alternatives)\b/.test(p)) return "research";
+
+  return "standard";
+}
+
+/**
+ * Determine which retrieval collectors to run based on task intelligence.
+ * Returns { skipRetrieval, useWeb, useMail, useFilesystem, useLookeen }
+ */
+function getRetrievalStrategy(complexity, taskType) {
+  switch (complexity) {
+    case "trivial":
+      return { skipRetrieval: true };
+    case "research":
+      return { skipRetrieval: false, useWeb: true, useMail: false, useFilesystem: false, useLookeen: false };
+    case "file-focused":
+      return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: false };
+    case "complex":
+      // Complex tasks get everything relevant to their type
+      if (taskType === "communication") return { skipRetrieval: false, useWeb: false, useMail: true, useFilesystem: false, useLookeen: false };
+      if (taskType === "coding" || taskType === "data_analysis") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: false };
+      if (taskType === "disputes") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: true, useRag: true };
+      return { skipRetrieval: false, useWeb: true, useMail: true, useFilesystem: true, useLookeen: true };
+    default:
+      // Standard: use task type to guide
+      if (taskType === "communication") return { skipRetrieval: false, useWeb: false, useMail: true, useFilesystem: false, useLookeen: false };
+      if (taskType === "research") return { skipRetrieval: false, useWeb: true, useMail: false, useFilesystem: false, useLookeen: false };
+      if (taskType === "documents" || taskType === "data_analysis") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: false };
+      if (taskType === "coding" || taskType === "automation") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: false };
+      if (taskType === "disputes") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: true, useRag: true };
+      return { skipRetrieval: false, useWeb: true, useMail: false, useFilesystem: true, useLookeen: false };
+  }
+}
+
+/**
+ * Format a provider error into a clean, human-readable one-liner.
+ * Catches common API error patterns and strips raw JSON.
+ */
+function formatProviderError(error, model = "") {
+  const msg = error instanceof Error ? error.message : String(error);
+  const lower = msg.toLowerCase();
+
+  // Quota / rate limit
+  if (lower.includes("429") || lower.includes("quota") || lower.includes("rate limit") || lower.includes("resource_exhausted")) {
+    return `quota exceeded`;
+  }
+  // Model not found / not a chat model
+  if (lower.includes("404") || lower.includes("not found") || lower.includes("not a chat model") || lower.includes("does not exist")) {
+    return `model not available`;
+  }
+  // Auth errors
+  if (lower.includes("401") || lower.includes("unauthorized") || lower.includes("invalid") && lower.includes("key")) {
+    return `invalid API key`;
+  }
+  // Connection errors
+  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("etimedout") || lower.includes("fetch failed")) {
+    return `provider unreachable`;
+  }
+  // Truncate long messages (likely raw JSON dumps)
+  if (msg.length > 150) {
+    return msg.slice(0, 120).replace(/[{"\\\n]/g, " ").trim() + "...";
+  }
+  return msg;
+}
+
 /** Last N fallback timeline entries for user-visible errors when all models fail. */
 function summarizeFallbackAttempts(timeline, max = 4) {
   const details = (timeline ?? [])
@@ -248,7 +381,11 @@ function getSkillInstruction(skillId) {
     case "document-review":
       return [
         "Operate in Document Review mode.",
-        "Assess clarity, completeness, specificity, and unnecessary scope. Highlight the single most critical improvement and then provide a concise revised recommendation."
+        "Extract all documents fully before analysis — never work from partial text.",
+        "For each document: map its structure, identify the parties and their positions, perform a forensic pass assessing claims vs evidence, flag internal inconsistencies and gaps.",
+        "When multiple documents are provided, cross-reference positions across them and trace how arguments evolve.",
+        "Synthesize with: bottom line up front, section-by-section findings, gaps/risks, recommended next steps.",
+        "For legal documents: track defined terms, identify burden of proof, assess quantum methodology, check delay causation logic."
       ].join(" ");
     case "using-superpowers":
       return [
@@ -577,7 +714,12 @@ function getAgentInstruction(activityProfile, agentName) {
       return `${sharedIntro} Review the cloud plan for risk, security, and maintainability issues.`;
     case "Synthesizer":
     default:
-      return `${sharedIntro} Combine the specialist outputs into one final, concise, user-facing response.`;
+      return `${sharedIntro} You are the FINAL output the user sees. Rules:
+1. Output ONLY the direct answer to the user's question. No preamble, no methodology, no "I reviewed..." narrative.
+2. NEVER repeat or summarize what the specialists did. The user doesn't know specialists exist and doesn't care.
+3. Lead with the answer (numbers, dates, findings), then supporting detail if needed.
+4. If something couldn't be determined, say what's missing in one line — don't explain the technical reason.
+5. Format for scanning: use tables, bullet points, bold key figures. No walls of text.`;
   }
 }
 
@@ -602,44 +744,104 @@ function buildSpecialistPrompt(originalPrompt, enrichedPrompt, priorOutputs, age
 
 // ── Richer per-activity system prompts ──────────────────────────────────────
 const ACTIVITY_SYSTEM_PROMPTS = {
-  coding: `You are an expert software engineer. When given a coding task:
-1. Read ALL relevant files before writing any code.
-2. Write complete, working implementations — never truncate with "// ...rest of code".
-3. Follow the existing code style and conventions precisely.
-4. After writing code, verify logic by tracing through edge cases mentally.
-5. Use the write_text_file tool to create or update files.
-6. Use git tools to commit changes with clear, descriptive messages.
-7. Return a concise summary of what was built and why each decision was made.`,
+  coding: `You are an expert software engineer. Follow this operational sequence:
 
-  research: `You are a thorough research analyst. When given a research task:
-1. Search broadly using available tools (filesystem, browser, mail) before synthesising.
-2. Distinguish between facts, inferences, and opinions clearly.
-3. Cite the source of each key claim (file path, URL, or email subject).
-4. Structure findings: Executive Summary → Key Facts → Analysis → Recommendations.
-5. Flag gaps in information explicitly rather than speculating.
-6. Keep the final answer under 1,000 words unless depth is explicitly requested.`,
+1. UNDERSTAND BEFORE ACTING — read all relevant files, understand the architecture, existing patterns, and conventions before writing anything.
+2. PLAN THE CHANGE — identify which files need modification, what the dependencies are, and what could break.
+3. IMPLEMENT COMPLETELY — write full, working implementations. Never truncate with "// ...rest" or placeholder code.
+4. FOLLOW CONVENTIONS — match the existing code style exactly (indentation, naming, module patterns, error handling style).
+5. VERIFY — trace through edge cases mentally. If shell_exec or test tools are available, run them.
+6. SAVE AND COMMIT — use write_text_file to save, git tools to commit with descriptive messages.
+7. REPORT — summarise what changed, why, and any follow-up needed.
 
-  data_analysis: `You are a skilled data analyst. When analysing data:
-1. First inspect the data structure (headers, sample rows, data types, null counts).
-2. State your analytical approach before executing it.
-3. Produce clean, correctly-formatted output (CSV, Markdown table, or report as appropriate).
-4. Include descriptive statistics where useful (count, min, max, mean, distribution).
-5. Highlight anomalies, outliers, or data quality issues.
-6. Summarise findings in plain language after technical output.`,
+WHEN DEBUGGING:
+- Read the error message carefully. Most errors tell you exactly what's wrong.
+- Check the most recent change first — it's usually the cause.
+- Don't guess — read the actual code at the failing line.
+- Fix the root cause, not the symptom.`,
 
-  documents: `You are a professional writer and editor. When creating documents:
-1. Match the tone and style requested (formal, casual, technical, executive).
-2. Structure documents with clear headings, numbered lists where appropriate.
-3. Write complete documents — never use placeholder text.
-4. Use the write_markdown or write_report tools to save documents.
-5. After writing, confirm file path and word count.`,
+  research: `You are an expert researcher and analyst. Follow this operational sequence:
 
-  orchestrator: `You are a strategic planning expert. When creating a workflow plan:
-1. Break the goal into discrete, testable phases with clear outputs.
-2. Assign the most appropriate activity type to each phase.
-3. Identify which phases can run in parallel vs. sequentially.
-4. For each phase, write a concrete, action-oriented prompt — not vague instructions.
-5. Output a valid wcjr-plan block as specified.`,
+1. FRAME THE QUESTION — restate what you're investigating. Identify what a good answer looks like.
+2. GATHER SYSTEMATICALLY — use all available tools in parallel:
+   - search_memory for prior context and user preferences
+   - browser fetch for web sources
+   - filesystem tools for local documents
+   - mail/calendar search for correspondence
+   - rag_search for previously ingested documents
+3. VERIFY AND CROSS-REFERENCE — never rely on a single source. Cross-check across at least two independent sources. Flag conflicts.
+4. ASSESS CONFIDENCE — HIGH (multiple corroborating sources), MEDIUM (single reliable source), LOW (inference/extrapolation).
+5. SYNTHESIZE — lead with the answer, then supporting evidence, then caveats and gaps.
+6. CITE SOURCES — reference specific documents, URLs, email subjects, or file paths.
+7. IDENTIFY NEXT STEPS — what would strengthen this research if the user wants to go deeper.`,
+
+  data_analysis: `You are a skilled data analyst. Follow this operational sequence:
+
+1. INSPECT — read the data source (CSV, XLSX, JSON, database). Identify structure: columns/fields, data types, row count, null rates.
+2. PROFILE — compute descriptive statistics (count, min, max, mean, median, std dev, percentiles) for numeric columns. For categorical columns, show value counts and cardinality.
+3. CLEAN — identify and flag: missing values, duplicates, outliers (>3 std dev), inconsistent formats, data type mismatches.
+4. ANALYSE — state your analytical approach explicitly before executing. Apply the method, show working.
+5. VISUALISE — describe what charts would be most informative (the user can request you generate them).
+6. REPORT — structured output: Executive Summary → Data Quality Assessment → Key Findings → Anomalies → Recommendations.
+7. EXPORT — use write_report or export tools to save results in the requested format (Markdown, CSV, XLSX).
+
+WHEN CODE IS NEEDED (reconciliation, pivot tables, complex transforms):
+- Write Python scripts using pandas for data manipulation and analysis.
+- Use the run_command or run_script tool to execute scripts and capture output.
+- For Excel reconciliation: load both sheets with pandas, merge/compare on key columns, output differences.
+- For pivot tables: use pandas.pivot_table() and format results clearly.
+- Always show the script you're running before executing it.
+- Parse and summarise the output — don't dump raw script output to the user.`,
+
+  documents: `You are a forensic document analyst and professional writer. Follow this operational sequence:
+
+ANALYSIS MODE (when reviewing existing documents):
+1. EXTRACT FULLY — use extract_document_text on every document. If a document is large, extract it and confirm you have the complete text before analysis. Never analyse partial extractions.
+2. MAP THE STRUCTURE — identify the document type (contract, pleading, report, letter, agreement), its sections, defined terms, and cross-references.
+3. IDENTIFY THE PARTIES — who authored it, who is the audience, what are the competing positions.
+4. FORENSIC PASS — for each substantive section:
+   a. What claim or assertion is being made?
+   b. What evidence or authority supports it?
+   c. What is missing, weak, or contradicted by other documents?
+   d. Are there internal inconsistencies or shifts from earlier positions?
+5. CROSS-REFERENCE — when multiple documents are provided, trace how positions evolve across them. Flag material changes between Letter of Claim, Response, Reply etc.
+6. SYNTHESIZE — produce a structured analysis: bottom line up front, then section-by-section findings, then gaps/risks, then recommended next steps.
+
+DRAFTING MODE (when creating documents):
+1. Match tone and style to the document type (formal legal, executive summary, technical report).
+2. Structure with clear headings and numbered paragraphs.
+3. Write complete documents — never use placeholder text or "[insert here]".
+4. Use write_markdown or write_report tools to save. Confirm file path and word count.
+
+LEGAL DOCUMENT SPECIFICS:
+- Always identify the contract/agreement being referenced and the relevant clauses.
+- Track defined terms and use them consistently.
+- Distinguish between factual assertions and legal submissions.
+- Note where burden of proof lies and whether it has been discharged.
+- Flag quantum methodology issues (are primary records exhibited? is the build-up auditable?).
+- For delay claims: identify the critical path, the alleged cause, and whether float was consumed.`,
+
+  orchestrator: `You are a strategic workflow planner for an AI assistant with access to local files, email, calendar, web search, document analysis, RAG retrieval, code execution, and 30+ MCP tool connectors. Follow this sequence:
+
+1. CLASSIFY THE GOAL — what is the user actually trying to achieve? Is this research, document analysis, code work, communication, or a multi-domain task?
+2. IDENTIFY AVAILABLE CAPABILITIES — check which MCP tools are connected and what the user's setup supports (local models via Ollama, cloud providers, file access, mail access, RAG).
+3. DESIGN THE WORKFLOW — break the goal into phases:
+   - Each phase has ONE clear output (a document, a finding, a code change, a decision).
+   - Assign the best activity type: research, documents, coding, automation, communication, data_analysis, creative, project_mgmt, aws_cloud.
+   - Use "forensic" depth for critical analysis, "standard" for normal work, "quick" for simple lookups.
+   - Phases that don't depend on each other should run in parallel.
+4. WRITE ACTIONABLE PROMPTS — each phase prompt must be specific enough that a specialist agent can execute it without guessing. Include:
+   - What to do (verb-first: "Extract the full text of...", "Search mail for...", "Compare sections 4.1 and 4.3...")
+   - What tools to use (name them explicitly)
+   - What output format is expected
+5. ANTICIPATE FAILURES — if a document might be large, tell the agent to verify full extraction. If a search might return nothing, specify fallback steps.
+6. OUTPUT — produce a valid wcjr-plan block as specified.
+
+COMMON PATTERNS:
+- Document review: extract → map structure → forensic analysis → cross-reference → synthesize
+- Research: frame question → parallel search (web + local + mail + RAG) → cross-reference → synthesize
+- Code task: read codebase → plan changes → implement → test → commit
+- Multi-document legal: extract all docs → identify positions → trace evolution → assess strengths/weaknesses → produce advisory note`,
 
   automation: `You are a systems automation engineer. When building automation:
 1. Prefer robust, idempotent scripts over fragile one-liners.
@@ -659,7 +861,30 @@ const ACTIVITY_SYSTEM_PROMPTS = {
 1. Break goals into SMART objectives (Specific, Measurable, Achievable, Relevant, Time-bound).
 2. Identify dependencies and critical path items.
 3. Surface blockers and risks proactively.
-4. Produce structured outputs: action items with owners, deadlines, and priority.`
+4. Produce structured outputs: action items with owners, deadlines, and priority.`,
+
+  disputes: `You are a forensic disputes analyst and construction claims specialist. Follow this operational sequence:
+
+EVIDENCE GATHERING:
+1. CHECK FOR EXPLICIT PATH — if the user provides a file or folder path, read from it directly using filesystem tools. Do not search if a path is given.
+2. QUERY KNOWLEDGE BASE — use knowledge_query to search matter collections. Use metadata filters (assessmentWindow, custodian, documentType) to narrow results.
+3. SEARCH LOOKEEN — if the knowledge base returns insufficient results, use Lookeen to search across the full 5M+ indexed corpus.
+4. PROMOTE RELEVANT FILES — when Lookeen surfaces relevant documents not yet in the knowledge base, use knowledge_promote to ingest them.
+
+EVIDENCE STANDARDS:
+5. VERBATIM QUOTES ONLY — every factual assertion must include an exact quote from the source material. Use the citation field from knowledge_query results. Never paraphrase or summarise evidence.
+6. CITATION FORMAT — place the citation immediately after every verbatim quote. Example:
+   "The delay to the S278 works is acknowledged" [Email: John Smith to William Rogers, 14 March 2024, Subject: "RE: S278 Works"]
+7. NO UNSOURCED ASSERTIONS — if you cannot find evidence for a point, say so explicitly. Do not infer or speculate.
+
+ARTEFACT GENERATION:
+8. USE MATTER_ANALYSE — when building chronologies, custodian maps, contested issues, or evidence summaries, call matter_analyse first to gather cited evidence.
+9. USE DOCUMENT ENGINES — call create_workbook for xlsx artefacts (chronologies, custodian maps) or create_document for docx artefacts (contested issues, evidence summaries).
+10. PERSIST SUMMARIES — after generating any artefact, save a structured summary back into the 'artefacts' collection using knowledge_ingest, tagged with the matter name and analysis type.
+
+DATE FORMAT: DD Month YYYY throughout. Never use MM/DD/YYYY or YYYY-MM-DD in user-facing output.
+
+TERMINOLOGY: Use assessment window identifiers (W4, W5a, W5b) exactly as established in the matter. Use contract-defined terms with initial capitals.`
 };
 
 function getActivitySystemPrompt(taskType) {
@@ -713,7 +938,7 @@ export class Orchestrator {
     return this.mcpHub.connectAll();
   }
 
-  async collectToolContext(prompt, resolvedTaskType, timeline, emitStatus, memoryItems = []) {
+  async collectToolContext(prompt, resolvedTaskType, timeline, emitStatus, memoryItems = [], retrievalStrategy = {}) {
     const configuredServers = this.mcpHub.getServers().filter((server) => server.enabled !== false);
     const statuses = this.mcpHub.getStatuses();
     const hasConnectedServer = statuses.some((status) => status.status === "connected");
@@ -742,7 +967,8 @@ export class Orchestrator {
       serverContexts,
       mcpHub: this.mcpHub,
       emitStatus,
-      memoryItems
+      memoryItems,
+      strategy: retrievalStrategy
     });
     contextSections.push(...(brokered.contextSections ?? []));
     toolActivity.push(...(brokered.toolActivity ?? []));
@@ -939,7 +1165,7 @@ export class Orchestrator {
         lastError = error;
         timeline.push({
           stage: "fallback",
-          detail: `${candidateModel} failed: ${error instanceof Error ? error.message : String(error)}`
+          detail: `${candidateModel}: ${formatProviderError(error, candidateModel)}`
         });
       }
     }
@@ -1018,14 +1244,21 @@ export class Orchestrator {
     let toolActivity = [];
     let contextSections = [];
     let toolTrace = [];
+    const complexity = assessTaskComplexity(prompt);
 
-    if (runMode === "sandboxed") {
+    const retrievalStrategy = getRetrievalStrategy(complexity, resolvedTaskType);
+    timeline.push({ stage: "strategy", detail: `Complexity: ${complexity} | Web: ${!!retrievalStrategy.useWeb} | Mail: ${!!retrievalStrategy.useMail} | Files: ${!!retrievalStrategy.useFilesystem}` });
+
+    if (retrievalStrategy.skipRetrieval) {
+      timeline.push({ stage: "shortcut", detail: "Trivial task — skipping retrieval" });
+    } else if (runMode === "sandboxed") {
       const collected = await this.collectToolContext(
         prompt,
         resolvedTaskType,
         timeline,
         emitStatus,
-        memoryItems
+        memoryItems,
+        retrievalStrategy
       );
       toolSummary = collected.toolSummary;
       toolActivity = collected.toolActivity;
@@ -1048,7 +1281,8 @@ export class Orchestrator {
           resolvedTaskType,
           timeline,
           emitStatus,
-          memoryItems
+          memoryItems,
+          retrievalStrategy
         );
         toolSummary = collected.toolSummary;
         toolActivity = collected.toolActivity;
@@ -1182,7 +1416,7 @@ export class Orchestrator {
 
     timeline.push({
       stage: "model",
-      detail: `Primary model '${selectedModel}' selected`
+      detail: `Primary model '${selectedModel}' selected (complexity: ${complexity})`
     });
 
     let lastError = null;
@@ -1213,12 +1447,59 @@ export class Orchestrator {
 
       emitStatus(`Using ${providerId} / ${candidateModel} for '${resolvedTaskType}' task...`);
       try {
-        const specialistOutputs = [];
-        for (const agentName of specialistAgents.slice(0, -1)) {
-          emitStatus(`${activityProfile.label}: ${agentName} working...`);
-          const phaseResult = await this.options.invokeModel({
+        // ── Simple tasks: skip specialist agents, single model call ──
+        if (complexity === "trivial") {
+          timeline.push({ stage: "shortcut", detail: "Simple task — skipping specialist chain" });
+          const result = await this.options.invokeModel({
             providerId,
             model: candidateModel,
+            prompt: enrichedPrompt,
+            messages: [
+              { role: "system", content: [systemMessage, getActivitySystemPrompt(resolvedTaskType)].filter(Boolean).join("\n\n") },
+              ...sanitizedConversationMessages,
+              { role: "user", content: enrichedPrompt }
+            ],
+            taskType: resolvedTaskType,
+            taskContext
+          });
+          if (result.toolTrace?.length) {
+            aggregateToolTrace.push(...result.toolTrace);
+            aggregateToolActivity.push(...summarizeToolTrace(result.toolTrace));
+          }
+          timeline.push({ stage: "result", detail: `Completed with ${providerId} / ${candidateModel}` });
+          return {
+            taskType: resolvedTaskType,
+            model: candidateModel,
+            provider: providerId,
+            content: result.content,
+            agentRuns: [{ agentName: "direct", content: result.content }],
+            toolSummary,
+            toolActivity: aggregateToolActivity,
+            toolTrace: aggregateToolTrace,
+            timeline,
+            runMode,
+            fallbackChain
+          };
+        }
+
+        // ── Standard/complex tasks: full specialist agent chain ──
+        const specialistOutputs = [];
+        for (const agentName of specialistAgents.slice(0, -1)) {
+          // Model council: pick best provider ONLY for non-tool agents (suppressStream: true skips tools)
+          const council = SPECIALIST_MODEL_MAP[agentName];
+          let agentProvider = providerId;
+          let agentModel = candidateModel;
+          if (council && council.provider === providerId) {
+            // Same provider — safe to use council model
+            agentModel = council.model;
+          }
+          // Cross-provider routing disabled until tool format conversion is implemented
+          // TODO: add tool format conversion per provider to enable full model council
+
+          emitStatus(`${activityProfile.label}: ${agentName} (${agentProvider}/${agentModel})...`);
+          const phaseResult = await this.options.invokeModel({
+            providerId: agentProvider,
+            model: agentModel,
             prompt: enrichedPrompt,
             messages: [
               {
@@ -1263,7 +1544,7 @@ export class Orchestrator {
           }
         }
 
-        emitStatus(`${activityProfile.label}: Synthesizing final response...`);
+        emitStatus(`${activityProfile.label}: Synthesizing (${providerId}/${candidateModel})...`);
         const result = await this.options.invokeModel({
           providerId,
           model: candidateModel,
@@ -1324,9 +1605,9 @@ export class Orchestrator {
         lastError = error;
         timeline.push({
           stage: "fallback",
-          detail: `${providerId} / ${candidateModel} failed: ${error instanceof Error ? error.message : String(error)}`
+          detail: `${providerId}/${candidateModel}: ${formatProviderError(error, candidateModel)}`
         });
-        emitStatus(`Fallback triggered after ${candidateModel} failed. Trying next configured model...`);
+        emitStatus(`${candidateModel} unavailable (${formatProviderError(error, candidateModel)}) — trying next model...`);
       }
     }
 
