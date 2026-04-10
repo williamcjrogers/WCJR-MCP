@@ -1,3 +1,5 @@
+import path from "node:path";
+import fs from "node:fs/promises";
 import { MCPHub } from "@wcjr/mcp-hub";
 import { ModelRouter, TASK_TYPES } from "@wcjr/model-router";
 import {
@@ -1094,6 +1096,47 @@ export class Orchestrator {
       }
     }
 
+    // ── L1: Prior artifacts from task store (same task type, recent, still on disk) ──
+    if (this.options.taskStore && typeof this.options.taskStore.listByType === "function") {
+      try {
+        const priorTasks = this.options.taskStore.listByType(resolvedTaskType, {
+          withArtifacts: true,
+          status: "completed",
+          limit: 5
+        });
+        const candidateArtifacts = priorTasks
+          .flatMap((t) => (t.artifacts ?? []).slice(-3))
+          .slice(-5);
+        const livingArtifacts = [];
+        for (const art of candidateArtifacts) {
+          if (!art?.path) continue;
+          try {
+            await Promise.race([
+              fs.lstat(art.path),
+              new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 500))
+            ]);
+            livingArtifacts.push(art);
+          } catch {
+            // Stale — skip
+          }
+        }
+        if (livingArtifacts.length) {
+          const block = livingArtifacts
+            .map((a, i) => `${i + 1}. ${a.path} (${a.kind ?? "other"}, ${a.sizeBytes ?? 0}B, phase: ${a.producedBy?.[0]?.phaseId ?? "?"})`)
+            .join("\n");
+          contextSections.push(
+            `PRIOR ARTIFACTS (from previous ${resolvedTaskType} runs):\n${block}`
+          );
+          timeline.push({
+            stage: "artifacts",
+            detail: `Injected ${livingArtifacts.length} prior artifact(s) from task store`
+          });
+        }
+      } catch (err) {
+        console.warn("[orchestrator] prior artifacts lookup failed:", err?.message ?? err);
+      }
+    }
+
     return { toolSummary, toolActivity, contextSections };
   }
 
@@ -1477,6 +1520,19 @@ export class Orchestrator {
       const fallbackChain = this.modelRouter.getFallbackChain(selectedModel);
       const providerId = this.options.resolveProvider?.(selectedModel) ?? "openai";
 
+      // ── L1: create per-run scratch workspace ──
+      let workspaceDir = null;
+      if (this.options.runsDir) {
+        const runId = taskContext?.taskId ?? `adhoc-${Date.now()}`;
+        workspaceDir = path.join(this.options.runsDir, runId);
+        try {
+          await fs.mkdir(workspaceDir, { recursive: true });
+        } catch (err) {
+          console.warn(`[orchestrator] failed to create workspace ${workspaceDir}:`, err?.message ?? err);
+          workspaceDir = null;
+        }
+      }
+
       // Synchronous key check for getCriticModel. Prefers this.options.hasApiKeySync
       // when the host provides it; otherwise falls back to optimistic true so that
       // tests and hosts without a sync key check still function.
@@ -1507,6 +1563,7 @@ export class Orchestrator {
         originalGoal: prompt,
         taskType: resolvedTaskType,
         executorModel: selectedModel,
+        workspaceDir,
         invokeModel: this.options.invokeModel,
         resolveProvider: this.options.resolveProvider,
         hasApiKey: hasKeySync,
@@ -1531,7 +1588,10 @@ export class Orchestrator {
         systemMessage: [
           "You are a highly capable personal assistant. Be concise, accurate, and actionable.",
           getSkillInstruction(skillId),
-          memoryContext ? `Remembered user context:\n${memoryContext}` : ""
+          memoryContext ? `Remembered user context:\n${memoryContext}` : "",
+          workspaceDir
+            ? `Your scratch workspace for this run is at ${workspaceDir}. Save intermediate files there by default, for example ${workspaceDir}${path.sep}matter-summary.xlsx, unless the user specified a specific location.`
+            : ""
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -1561,7 +1621,8 @@ export class Orchestrator {
           ),
           planSummary: (iterativeResult.ledger?.phases ?? [])
             .map((p) => `${p.id}: ${p.status}`)
-            .join(", ")
+            .join(", "),
+          artifacts: iterativeResult.ledger?.artifacts ?? []
         });
       }
 
@@ -1597,6 +1658,7 @@ export class Orchestrator {
         fallbackChain,
         pendingApproval: iterativeResult.pendingApproval ?? false,
         runLedger: iterativeResult.ledger,
+        artifacts: iterativeResult.ledger?.artifacts ?? [],
         ...(iterativeResult.escalationReason ? { escalationReason: iterativeResult.escalationReason } : {}),
         ...(iterativeResult.error ? { error: iterativeResult.error } : {})
       };
