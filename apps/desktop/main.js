@@ -2532,19 +2532,104 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
     }
   };
 
+  // L3a: inline status helper for the two-step iterative path. Routes through
+  // taskContext.onProgress so updates flow to the task store, mainWindow, and
+  // the telegram throttle just like normal progress messages.
+  const emitIterativeStatus = (message) => {
+    try {
+      taskContext.onProgress({ current: 0, total: 1, message });
+    } catch {
+      // Progress emission is best-effort — never let it break the task.
+    }
+  };
+
   try {
-    const summary = await orchestrator.executeTask({
-      prompt,
-      taskType: resolvedTaskType,
-      modelOverride,
-      runMode: resolvedRunMode,
-      taskContext,
-      conversationMessages: priorConversationMessages,
-      memoryItems: relevantMemories,
-      memoryContext: buildMemoryContext(relevantMemories),
-      skillId,
-      executionPhase
-    });
+    let summary;
+    if (resolvedRunMode === "iterative") {
+      // L3a: iterative mode requires taskContext.executionPlan. Generate it
+      // via a plan-phase call, then run the execute-phase with the plan
+      // attached. Ambient sources auto-approve (no user gate).
+      emitIterativeStatus("Iterative mode: generating plan...");
+      const planSummary = await orchestrator.executeTask({
+        prompt,
+        taskType: resolvedTaskType,
+        modelOverride,
+        runMode: "direct", // Plan-phase uses direct-mode, not iterative recursion
+        taskContext,
+        conversationMessages: priorConversationMessages,
+        memoryItems: relevantMemories,
+        memoryContext: buildMemoryContext(relevantMemories),
+        skillId,
+        executionPhase: "plan"
+      });
+
+      const iterativePlan = planSummary?.executionPlan ?? null;
+      if (!iterativePlan || !Array.isArray(iterativePlan?.phases) || iterativePlan.phases.length === 0) {
+        // Plan phase failed to produce a usable plan. Fall back to a single-phase
+        // plan containing the prompt itself so the iterative branch still runs.
+        // This is degraded but observable — the runLedger will show one phase.
+        emitIterativeStatus("Iterative plan empty; using single-phase fallback");
+        const fallbackPlan = {
+          planVersion: 2,
+          summary: prompt.slice(0, 200),
+          phases: [
+            {
+              id: "p1",
+              activity: resolvedTaskType,
+              title: "Execute request",
+              prompt: prompt,
+              depth: "standard",
+              parallelGroup: 0,
+              dependsOn: [],
+              approvalRequired: false
+            }
+          ]
+        };
+        const iterativeTaskContext = { ...taskContext, executionPlan: fallbackPlan };
+        summary = await orchestrator.executeTask({
+          prompt,
+          taskType: resolvedTaskType,
+          modelOverride,
+          runMode: "iterative",
+          taskContext: iterativeTaskContext,
+          conversationMessages: priorConversationMessages,
+          memoryItems: relevantMemories,
+          memoryContext: buildMemoryContext(relevantMemories),
+          skillId,
+          executionPhase: "execute"
+        });
+      } else {
+        // Auto-approve the generated plan and run iteratively.
+        emitIterativeStatus(`Iterative plan ready (${iterativePlan.phases.length} phase(s)) — executing...`);
+        const iterativeTaskContext = { ...taskContext, executionPlan: iterativePlan };
+        summary = await orchestrator.executeTask({
+          prompt,
+          taskType: resolvedTaskType,
+          modelOverride,
+          runMode: "iterative",
+          taskContext: iterativeTaskContext,
+          conversationMessages: priorConversationMessages,
+          memoryItems: relevantMemories,
+          memoryContext: buildMemoryContext(relevantMemories),
+          skillId,
+          executionPhase: "execute"
+        });
+      }
+    } else {
+      // Non-iterative modes (direct, sandboxed) keep the single-call flow unchanged.
+      summary = await orchestrator.executeTask({
+        prompt,
+        taskType: resolvedTaskType,
+        modelOverride,
+        runMode: resolvedRunMode,
+        taskContext,
+        conversationMessages: priorConversationMessages,
+        memoryItems: relevantMemories,
+        memoryContext: buildMemoryContext(relevantMemories),
+        skillId,
+        executionPhase
+      });
+    }
 
     const finalTask = store.get(task.id);
     const pendingApproval = Boolean(summary?.pendingApproval);
