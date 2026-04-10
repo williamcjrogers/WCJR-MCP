@@ -73,6 +73,10 @@ export class ModelRouter {
    * @returns {string|null}
    */
   getCriticModel(executorModel, hasKey) {
+    if (!executorModel || typeof hasKey !== "function") {
+      console.warn("[model-router] getCriticModel called with invalid arguments");
+      return null;
+    }
     const CRITIC_PREFERENCES = {
       "gpt-": "claude-sonnet-4-6-20250514",
       "claude-": "gemini-2.5-pro",

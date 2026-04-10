@@ -28,3 +28,18 @@ test("getCriticModel returns null when only the executor model is available", ()
   const critic = router.getCriticModel("gpt-5.4", (model) => model === "gpt-5.4");
   assert.equal(critic, null);
 });
+
+test("getCriticModel returns null for invalid arguments", () => {
+  const router = new ModelRouter({});
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(router.getCriticModel(null, () => true), null);
+    assert.equal(router.getCriticModel(undefined, () => true), null);
+    assert.equal(router.getCriticModel("", () => true), null);
+    assert.equal(router.getCriticModel("gpt-5.4", null), null);
+    assert.equal(router.getCriticModel("gpt-5.4", "not a function"), null);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
