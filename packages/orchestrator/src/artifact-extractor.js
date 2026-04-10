@@ -68,13 +68,12 @@ export function isPlausibleAbsolutePath(value) {
 
 export function isBlacklistedPath(absPath) {
   if (typeof absPath !== "string") return false;
-  const normalized = absPath;
   return BLACKLIST_PREFIXES.some((prefix) => {
     // Case-insensitive compare on Windows-style prefixes, exact on POSIX
     if (prefix.includes("\\")) {
-      return normalized.toLowerCase().startsWith(prefix.toLowerCase());
+      return absPath.toLowerCase().startsWith(prefix.toLowerCase());
     }
-    return normalized.startsWith(prefix);
+    return absPath.startsWith(prefix);
   });
 }
 

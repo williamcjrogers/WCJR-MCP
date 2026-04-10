@@ -134,3 +134,13 @@ test("mergeArtifactHistory preserves distinct ids", () => {
   const merged = mergeArtifactHistory([a1, a2]);
   assert.equal(merged.length, 2);
 });
+
+test("extractCandidatePathsFromResult regex fallback excludes arg paths for unknown tools", () => {
+  const paths = extractCandidatePathsFromResult({
+    tool: "unknown_tool",
+    args: { outputFile: "/tmp/input.txt" },
+    result: { outputFile: "/tmp/input.txt", resultFile: "/tmp/output.txt" }
+  });
+  // /tmp/input.txt appears in args → excluded; /tmp/output.txt not in args → included
+  assert.deepEqual(paths, ["/tmp/output.txt"]);
+});
