@@ -1,5 +1,6 @@
 // packages/orchestrator/src/planner.js
 import { runCritic } from "./critic.js";
+import { extractArtifactsFromPhase as defaultExtractArtifacts, mergeArtifactHistory } from "./artifact-extractor.js";
 
 function summarizePlan(phases, currentIndex) {
   return phases
@@ -53,6 +54,8 @@ export async function runIterativePlan({
   originalGoal,
   taskType,
   executorModel,
+  workspaceDir,
+  extractArtifacts,
   invokeModel,
   resolveProvider,
   hasApiKey,
@@ -65,6 +68,7 @@ export async function runIterativePlan({
   enrichedPrompt
 }) {
   const startedAt = Date.now();
+  const extractArtifactsFn = extractArtifacts ?? defaultExtractArtifacts;
   let phases = [...(plan.phases ?? [])];
   const ledger = {
     startedAt,
@@ -154,6 +158,22 @@ export async function runIterativePlan({
         const phaseToolTrace = result?.toolTrace ?? [];
         phaseEntry.toolTrace = phaseToolTrace;
 
+        // ── L1: extract artifacts produced by this phase ──
+        const phaseEndedAt = Date.now();
+        try {
+          phaseEntry.artifacts = await extractArtifactsFn({
+            phaseToolTrace,
+            workspaceDir,
+            phaseId: phase.id,
+            runId: plan.taskId ?? "adhoc",
+            phaseStartedAt,
+            phaseEndedAt
+          });
+        } catch (extractErr) {
+          console.warn(`[planner] artifact extraction failed for ${phase.id}:`, extractErr?.message ?? extractErr);
+          phaseEntry.artifacts = [];
+        }
+
         // Run the critic
         if (criticSelection) {
           emitStatus?.(`Critic reviewing phase ${phaseNum} (${criticSelection.model})...`);
@@ -167,7 +187,8 @@ export async function runIterativePlan({
             phaseId: phase.id,
             phaseIntent: phase.title ?? phase.prompt,
             phaseResult: lastContent.slice(0, 3000),
-            toolTraceSummary: summarizeToolTrace(phaseToolTrace)
+            toolTraceSummary: summarizeToolTrace(phaseToolTrace),
+            artifacts: phaseEntry.artifacts
           });
 
           phaseEntry.criticVerdicts.push(verdict);
@@ -208,6 +229,8 @@ export async function runIterativePlan({
             ledger.endedAt = Date.now();
             ledger.budget.wallClockMs = Date.now() - startedAt;
             ledger.budget.phasesUsed = totalPhasesExecuted;
+            const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+            ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
             return {
               outcome: "escalated",
               content: lastContent,
@@ -241,6 +264,8 @@ export async function runIterativePlan({
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
       ledger.budget.phasesUsed = totalPhasesExecuted;
+      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
       return {
         outcome: "escalated",
         content: lastContent,
@@ -258,6 +283,8 @@ export async function runIterativePlan({
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
       ledger.budget.phasesUsed = totalPhasesExecuted;
+      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
       return {
         outcome: "failed",
         content: lastContent,
@@ -277,6 +304,10 @@ export async function runIterativePlan({
   ledger.endedAt = Date.now();
   ledger.budget.wallClockMs = Date.now() - startedAt;
   ledger.budget.phasesUsed = totalPhasesExecuted;
+
+  // ── L1: merge phase-level artifacts into a run-level list ──
+  const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+  ledger.artifacts = mergeArtifactHistory(allArtifacts);
 
   return {
     outcome: ledger.outcome,

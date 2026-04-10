@@ -222,3 +222,41 @@ test("planner uses provided executorModel on phases without modelOverride", asyn
   assert.equal(seenModels[0], "claude-sonnet-4-6-20250514", "executor should use provided model");
   assert.equal(seenModels[1], "gemini-2.5-pro", "critic should use critic model");
 });
+
+test("planner attaches artifacts from the extractor and forwards them to the critic", async () => {
+  const criticCalls = [];
+
+  const result = await runIterativePlan({
+    plan: makePlan([{ id: "p1" }]),
+    originalGoal: "Test goal",
+    taskType: "research",
+    workspaceDir: "/fake/workspace",
+    extractArtifacts: async () => [
+      { id: "art_1", path: "/fake/workspace/out.xlsx", kind: "xlsx", sizeBytes: 123, producedBy: [{ phaseId: "p1" }] }
+    ],
+    invokeModel: async (opts) => {
+      // Executor call vs critic call: distinguish by the presence of "auditing" in system message
+      const isCriticCall = (opts.messages?.[0]?.content ?? "").includes("auditing");
+      if (isCriticCall) {
+        criticCalls.push(opts.messages[1]?.content ?? "");
+        return { content: JSON.stringify({ decision: "accept", reasoning: "ok", confidence: 0.9 }) };
+      }
+      return { content: "phase 1 done" };
+    },
+    resolveProvider: () => "openai",
+    hasApiKey: () => true,
+    getCriticModel: () => ({ model: "claude-sonnet-4-6-20250514", provider: "anthropic" }),
+    emitStatus: () => {},
+    onChunk: () => {},
+    budget: { maxCriticRoundsPerPhase: 2, maxTotalPhases: 12, maxWallClockMs: 60000, maxTokensTotal: 400000 }
+  });
+
+  assert.equal(result.outcome, "success");
+  assert.equal(result.ledger.phases[0].artifacts.length, 1);
+  assert.equal(result.ledger.phases[0].artifacts[0].kind, "xlsx");
+  assert.equal(result.ledger.artifacts.length, 1);
+  // Critic should have been given the artifacts section
+  assert.equal(criticCalls.length, 1);
+  assert.ok(criticCalls[0].includes("ARTIFACTS PRODUCED"));
+  assert.ok(criticCalls[0].includes("/fake/workspace/out.xlsx"));
+});
