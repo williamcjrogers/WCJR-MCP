@@ -34,15 +34,23 @@ export function buildCriticPrompt({
   phaseId,
   phaseIntent,
   phaseResult,
-  toolTraceSummary
+  toolTraceSummary,
+  artifacts
 }) {
+  const artifactSummary = Array.isArray(artifacts) && artifacts.length > 0
+    ? artifacts
+        .map((a) => `- ${a.path} (${a.kind}, ${a.sizeBytes ?? 0}B)`)
+        .join("\n")
+    : "";
+
   return [
     `ORIGINAL GOAL: ${originalGoal}`,
     `ACTIVITY PROFILE: ${taskType}`,
     `PLAN SO FAR:\n${planSummary}`,
     `PHASE JUST RUN: ${phaseId} — ${phaseIntent}`,
     `PHASE RESULT:\n${phaseResult}`,
-    toolTraceSummary ? `TOOL TRACE:\n${toolTraceSummary}` : ""
+    toolTraceSummary ? `TOOL TRACE:\n${toolTraceSummary}` : "",
+    artifactSummary ? `ARTIFACTS PRODUCED:\n${artifactSummary}` : ""
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -99,7 +107,8 @@ export async function runCritic({
   phaseId,
   phaseIntent,
   phaseResult,
-  toolTraceSummary
+  toolTraceSummary,
+  artifacts
 }) {
   const userMessage = buildCriticPrompt({
     originalGoal,
@@ -108,7 +117,8 @@ export async function runCritic({
     phaseId,
     phaseIntent,
     phaseResult,
-    toolTraceSummary
+    toolTraceSummary,
+    artifacts
   });
 
   try {

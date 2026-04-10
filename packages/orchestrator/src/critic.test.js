@@ -90,3 +90,35 @@ test("parseVerdict extracts JSON from fenced block with preamble", () => {
   assert.equal(verdict.confidence, 0.85);
   assert.equal(verdict._parseError, undefined);
 });
+
+test("buildCriticPrompt includes ARTIFACTS PRODUCED section when artifacts provided", () => {
+  const prompt = buildCriticPrompt({
+    originalGoal: "Make a workbook",
+    taskType: "disputes",
+    planSummary: "Phase 1: make workbook",
+    phaseId: "p1",
+    phaseIntent: "Create matter.xlsx",
+    phaseResult: "Created workbook with 3 sheets",
+    toolTraceSummary: "create_workbook: completed",
+    artifacts: [
+      { path: "/tmp/matter.xlsx", kind: "xlsx", sizeBytes: 12345 }
+    ]
+  });
+  assert.ok(prompt.includes("ARTIFACTS PRODUCED"));
+  assert.ok(prompt.includes("/tmp/matter.xlsx"));
+  assert.ok(prompt.includes("xlsx"));
+});
+
+test("buildCriticPrompt omits ARTIFACTS PRODUCED when artifacts empty", () => {
+  const prompt = buildCriticPrompt({
+    originalGoal: "Goal",
+    taskType: "disputes",
+    planSummary: "plan",
+    phaseId: "p1",
+    phaseIntent: "intent",
+    phaseResult: "result",
+    toolTraceSummary: "",
+    artifacts: []
+  });
+  assert.ok(!prompt.includes("ARTIFACTS PRODUCED"));
+});
