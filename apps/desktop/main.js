@@ -2184,6 +2184,7 @@ function createOrchestrator() {
   orchestrator = new Orchestrator(appConfig, {
     resolveProvider,
     hasApiKey: async (providerId) => providerId === "ollama" || !!getDecryptedKey(providerId),
+    hasApiKeySync: (providerId) => providerId === "ollama" || !!getDecryptedKey(providerId),
     invokeModel: invokeAgenticModel,
     emitStatus: (text) => {
       emitStream({ type: "status", text: `${text}\n\n` });

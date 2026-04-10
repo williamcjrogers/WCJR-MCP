@@ -194,3 +194,31 @@ test("planner optimistically accepts when getCriticModel returns null", async ()
   assert.equal(result.ledger.phases[0].status, "accepted");
   assert.equal(result.ledger.phases[0].criticVerdicts.length, 0);
 });
+
+test("planner uses provided executorModel on phases without modelOverride", async () => {
+  const seenModels = [];
+  const result = await runIterativePlan({
+    plan: makePlan([{ id: "p1" }]),
+    originalGoal: "Test goal",
+    taskType: "research",
+    executorModel: "claude-sonnet-4-6-20250514",
+    invokeModel: async ({ model }) => {
+      seenModels.push(model);
+      // First call: executor. Second call: critic.
+      if (seenModels.length === 1) {
+        return { content: "p1 done" };
+      }
+      return { content: JSON.stringify({ decision: "accept", reasoning: "ok", confidence: 0.9 }) };
+    },
+    resolveProvider: () => "anthropic",
+    hasApiKey: () => true,
+    getCriticModel: () => ({ model: "gemini-2.5-pro", provider: "gemini" }),
+    emitStatus: () => {},
+    onChunk: () => {},
+    budget: { maxCriticRoundsPerPhase: 2, maxTotalPhases: 12, maxWallClockMs: 60000, maxTokensTotal: 400000 }
+  });
+
+  assert.equal(result.outcome, "success");
+  assert.equal(seenModels[0], "claude-sonnet-4-6-20250514", "executor should use provided model");
+  assert.equal(seenModels[1], "gemini-2.5-pro", "critic should use critic model");
+});

@@ -52,6 +52,7 @@ export async function runIterativePlan({
   plan,
   originalGoal,
   taskType,
+  executorModel,
   invokeModel,
   resolveProvider,
   hasApiKey,
@@ -124,7 +125,7 @@ export async function runIterativePlan({
       emitStatus?.(`Running phase ${phaseNum}/${totalPhases}: ${phase.title ?? phase.prompt}...`);
 
       // Resolve a provider for this phase
-      const phaseModel = phase.modelOverride ?? "gpt-5.4";
+      const phaseModel = phase.modelOverride ?? executorModel ?? "gpt-5.4";
       const providerId = resolveProvider?.(phaseModel) ?? "openai";
       phaseEntry.executorModel = phaseModel;
 

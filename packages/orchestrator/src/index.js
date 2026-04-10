@@ -1477,15 +1477,18 @@ export class Orchestrator {
       const fallbackChain = this.modelRouter.getFallbackChain(selectedModel);
       const providerId = this.options.resolveProvider?.(selectedModel) ?? "openai";
 
-      // Synchronous key check for getCriticModel. Wrap the async hasApiKey in a
-      // best-effort cache: L0 single-provider check per run is acceptable.
+      // Synchronous key check for getCriticModel. Prefers this.options.hasApiKeySync
+      // when the host provides it; otherwise falls back to optimistic true so that
+      // tests and hosts without a sync key check still function.
       const hasKeySync = (model) => {
         const pid = this.options.resolveProvider?.(model);
         if (!pid) return false;
         if (pid === "ollama") return true;
-        // this.options.hasApiKey is async; synchronous best-effort assumes
-        // the caller has already connected providers. For L0 scope this is
-        // acceptable — Task 5 wiring uses the selected provider synchronously.
+        if (typeof this.options.hasApiKeySync === "function") {
+          return this.options.hasApiKeySync(pid) === true;
+        }
+        // No sync check available — optimistic fallback. Hosts should provide
+        // hasApiKeySync for accurate critic selection.
         return true;
       };
 
@@ -1503,6 +1506,7 @@ export class Orchestrator {
         plan: taskContext.executionPlan,
         originalGoal: prompt,
         taskType: resolvedTaskType,
+        executorModel: selectedModel,
         invokeModel: this.options.invokeModel,
         resolveProvider: this.options.resolveProvider,
         hasApiKey: hasKeySync,
