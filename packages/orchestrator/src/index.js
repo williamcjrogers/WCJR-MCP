@@ -1107,19 +1107,21 @@ export class Orchestrator {
         const candidateArtifacts = priorTasks
           .flatMap((t) => (t.artifacts ?? []).slice(-3))
           .slice(-5);
-        const livingArtifacts = [];
-        for (const art of candidateArtifacts) {
-          if (!art?.path) continue;
-          try {
-            await Promise.race([
-              fs.lstat(art.path),
-              new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 500))
-            ]);
-            livingArtifacts.push(art);
-          } catch {
-            // Stale — skip
-          }
-        }
+        const probeTimers = [];
+        const probes = candidateArtifacts
+          .filter((art) => !!art?.path)
+          .map((art) =>
+            Promise.race([
+              fs.lstat(art.path).then(() => art),
+              new Promise((_, rej) => {
+                const t = setTimeout(() => rej(new Error("timeout")), 500);
+                probeTimers.push(t);
+              })
+            ]).catch(() => null)
+          );
+        const probeResults = await Promise.all(probes);
+        probeTimers.forEach((t) => clearTimeout(t));
+        const livingArtifacts = probeResults.filter(Boolean);
         if (livingArtifacts.length) {
           const block = livingArtifacts
             .map((a, i) => `${i + 1}. ${a.path} (${a.kind ?? "other"}, ${a.sizeBytes ?? 0}B, phase: ${a.producedBy?.[0]?.phaseId ?? "?"})`)
@@ -1559,7 +1561,7 @@ export class Orchestrator {
       });
 
       const iterativeResult = await runIterativePlan({
-        plan: taskContext.executionPlan,
+        plan: { ...taskContext.executionPlan, taskId: taskContext?.taskId ?? null },
         originalGoal: prompt,
         taskType: resolvedTaskType,
         executorModel: selectedModel,
