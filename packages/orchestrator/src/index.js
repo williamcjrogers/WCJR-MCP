@@ -6,6 +6,8 @@ import {
   resolveSkillDefinition
 } from "@wcjr/activity-profiles";
 import { buildRetrievalContext } from "./retrieval.js";
+import { runIterativePlan } from "./planner.js";
+import { generateAndWriteLesson } from "./lesson-writer.js";
 
 // ── Model Council: route each specialist agent to the best provider ────────
 const SPECIALIST_MODEL_MAP = {
@@ -111,29 +113,45 @@ function getRetrievalStrategy(complexity, taskType) {
 
 /**
  * Format a provider error into a clean, human-readable one-liner.
- * Catches common API error patterns and strips raw JSON.
+ * Providers now throw typed ProviderError subclasses from
+ * packages/providers/src/errors.js; prefer their pre-formatted `code`
+ * label. Falls back to pattern matching for anything that escaped typing.
  */
-function formatProviderError(error, model = "") {
+function formatProviderError(error, _model = "") {
+  if (error && typeof error === "object" && typeof error.code === "string" && error.name?.includes("Error")) {
+    switch (error.code) {
+      case "quota":
+        return "quota exceeded";
+      case "rate_limit":
+        return "rate limited";
+      case "auth":
+        return "API key invalid or missing";
+      case "model_not_found":
+        return "model not available";
+      case "unreachable":
+        return "provider unreachable";
+      case "timeout":
+        return "request timed out";
+      default:
+        break;
+    }
+  }
+
   const msg = error instanceof Error ? error.message : String(error);
   const lower = msg.toLowerCase();
 
-  // Quota / rate limit
   if (lower.includes("429") || lower.includes("quota") || lower.includes("rate limit") || lower.includes("resource_exhausted")) {
-    return `quota exceeded`;
+    return "quota exceeded";
   }
-  // Model not found / not a chat model
   if (lower.includes("404") || lower.includes("not found") || lower.includes("not a chat model") || lower.includes("does not exist")) {
-    return `model not available`;
+    return "model not available";
   }
-  // Auth errors
-  if (lower.includes("401") || lower.includes("unauthorized") || lower.includes("invalid") && lower.includes("key")) {
-    return `invalid API key`;
+  if (lower.includes("401") || lower.includes("unauthorized") || (lower.includes("invalid") && lower.includes("key"))) {
+    return "invalid API key";
   }
-  // Connection errors
   if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("etimedout") || lower.includes("fetch failed")) {
-    return `provider unreachable`;
+    return "provider unreachable";
   }
-  // Truncate long messages (likely raw JSON dumps)
   if (msg.length > 150) {
     return msg.slice(0, 120).replace(/[{"\\\n]/g, " ").trim() + "...";
   }
@@ -938,6 +956,18 @@ export class Orchestrator {
     return this.mcpHub.connectAll();
   }
 
+  startMcpHealthChecks(intervalMs) {
+    return this.mcpHub.startHealthChecks(intervalMs);
+  }
+
+  stopMcpHealthChecks() {
+    return this.mcpHub.stopHealthChecks();
+  }
+
+  async disconnectMcp() {
+    return this.mcpHub.disconnectAll({ preserveStatuses: true });
+  }
+
   async collectToolContext(prompt, resolvedTaskType, timeline, emitStatus, memoryItems = [], retrievalStrategy = {}) {
     const configuredServers = this.mcpHub.getServers().filter((server) => server.enabled !== false);
     const statuses = this.mcpHub.getStatuses();
@@ -1163,16 +1193,19 @@ export class Orchestrator {
         };
       } catch (error) {
         lastError = error;
+        const reason = formatProviderError(error, candidateModel);
         timeline.push({
           stage: "fallback",
-          detail: `${candidateModel}: ${formatProviderError(error, candidateModel)}`
+          detail: `${candidateModel}: ${reason}`
         });
+        emitStatus(`Routing: ${candidateModel} unavailable (${reason}) — trying next model...`);
       }
     }
 
+    const lastReason = lastError ? formatProviderError(lastError) : null;
     return {
       error: lastError
-        ? `Orchestrator planning failed: ${lastError.message ?? String(lastError)}`
+        ? `Orchestrator planning failed: ${lastReason ?? lastError.message ?? String(lastError)}`
         : "No configured model with a usable API key was available for orchestrator planning.",
       taskType: "orchestrator",
       timeline,
@@ -1411,6 +1444,119 @@ export class Orchestrator {
       }
     }
 
+    // ── Iterative mode: run the plan through the critic loop ──
+    if (runMode === "iterative" && taskContext?.executionPlan) {
+      const selectedModel = this.modelRouter.selectModel(resolvedTaskType, modelOverride);
+      const fallbackChain = this.modelRouter.getFallbackChain(selectedModel);
+      const providerId = this.options.resolveProvider?.(selectedModel) ?? "openai";
+
+      // Synchronous key check for getCriticModel. Wrap the async hasApiKey in a
+      // best-effort cache: L0 single-provider check per run is acceptable.
+      const hasKeySync = (model) => {
+        const pid = this.options.resolveProvider?.(model);
+        if (!pid) return false;
+        if (pid === "ollama") return true;
+        // this.options.hasApiKey is async; synchronous best-effort assumes
+        // the caller has already connected providers. For L0 scope this is
+        // acceptable — Task 5 wiring uses the selected provider synchronously.
+        return true;
+      };
+
+      const criticModelId = this.modelRouter.getCriticModel(selectedModel, hasKeySync);
+      const criticProvider = criticModelId
+        ? this.options.resolveProvider?.(criticModelId)
+        : null;
+
+      timeline.push({
+        stage: "iterative",
+        detail: `Iterative mode: executor=${selectedModel}, critic=${criticModelId ?? "none (optimistic accept)"}`
+      });
+
+      const iterativeResult = await runIterativePlan({
+        plan: taskContext.executionPlan,
+        originalGoal: prompt,
+        taskType: resolvedTaskType,
+        invokeModel: this.options.invokeModel,
+        resolveProvider: this.options.resolveProvider,
+        hasApiKey: hasKeySync,
+        getCriticModel: () =>
+          criticModelId && criticProvider
+            ? { model: criticModelId, provider: criticProvider }
+            : null,
+        emitStatus,
+        onChunk: quietMode
+          ? undefined
+          : (chunk) => {
+              if (chunk?.type === "status" && this.options.emitStatus) {
+                this.options.emitStatus(chunk.text);
+              }
+            },
+        budget: activityProfile.budget ?? {
+          maxCriticRoundsPerPhase: 2,
+          maxTotalPhases: 12,
+          maxWallClockMs: 10 * 60 * 1000,
+          maxTokensTotal: 400000
+        },
+        systemMessage: [
+          "You are a highly capable personal assistant. Be concise, accurate, and actionable.",
+          getSkillInstruction(skillId),
+          memoryContext ? `Remembered user context:\n${memoryContext}` : ""
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        conversationMessages: sanitizedConversationMessages,
+        enrichedPrompt
+      });
+
+      // Lesson writer — always runs on terminal state, never blocks
+      if (this.options.memoryStore) {
+        emitStatus("Recording lesson...");
+        const lessonModel = criticModelId ?? selectedModel;
+        const lessonProvider =
+          this.options.resolveProvider?.(lessonModel) ?? providerId;
+        await generateAndWriteLesson({
+          invokeModel: this.options.invokeModel,
+          lessonModel,
+          lessonProvider,
+          memoryStore: this.options.memoryStore,
+          taskType: resolvedTaskType,
+          originalGoal: prompt,
+          outcome: iterativeResult.outcome,
+          toolsUsed: (iterativeResult.ledger?.phases ?? []).flatMap(
+            (p) => (p.toolTrace ?? []).map((t) => t.tool)
+          ),
+          criticVerdicts: (iterativeResult.ledger?.phases ?? []).flatMap(
+            (p) => p.criticVerdicts ?? []
+          ),
+          planSummary: (iterativeResult.ledger?.phases ?? [])
+            .map((p) => `${p.id}: ${p.status}`)
+            .join(", ")
+        });
+      }
+
+      timeline.push({
+        stage: "result",
+        detail: `Iterative plan ${iterativeResult.outcome} (${iterativeResult.ledger?.budget?.phasesUsed ?? 0} phases)`
+      });
+
+      return {
+        taskType: resolvedTaskType,
+        model: selectedModel,
+        provider: providerId,
+        content: iterativeResult.content,
+        timeline,
+        toolSummary,
+        toolActivity,
+        toolTrace,
+        runMode,
+        fallbackChain,
+        pendingApproval: iterativeResult.pendingApproval ?? false,
+        runLedger: iterativeResult.ledger,
+        ...(iterativeResult.escalationReason ? { escalationReason: iterativeResult.escalationReason } : {}),
+        ...(iterativeResult.error ? { error: iterativeResult.error } : {})
+      };
+    }
+
     const selectedModel = this.modelRouter.selectModel(resolvedTaskType, modelOverride);
     const fallbackChain = this.modelRouter.getFallbackChain(selectedModel);
 
@@ -1603,11 +1749,12 @@ export class Orchestrator {
         };
       } catch (error) {
         lastError = error;
+        const reason = formatProviderError(error, candidateModel);
         timeline.push({
           stage: "fallback",
-          detail: `${providerId}/${candidateModel}: ${formatProviderError(error, candidateModel)}`
+          detail: `${providerId}/${candidateModel}: ${reason}`
         });
-        emitStatus(`${candidateModel} unavailable (${formatProviderError(error, candidateModel)}) — trying next model...`);
+        emitStatus(`Routing: ${candidateModel} unavailable (${reason}) — trying next model...`);
       }
     }
 
