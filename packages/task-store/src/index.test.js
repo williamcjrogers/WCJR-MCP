@@ -111,3 +111,49 @@ test("TaskStore serializes concurrent saves without corrupting the file", async 
   assert.ok(parsed.tasks.some((task) => task.prompt === "First task"));
   assert.ok(parsed.tasks.some((task) => task.prompt === "Second task"));
 });
+
+test("TaskStore.create initializes artifacts as an empty array", () => {
+  const store = new TaskStore();
+  const task = store.create({ prompt: "test", taskType: "disputes" });
+  assert.deepEqual(task.artifacts, []);
+});
+
+test("TaskStore.update persists artifacts field", () => {
+  const store = new TaskStore();
+  const task = store.create({ prompt: "test", taskType: "disputes" });
+  const artifacts = [{ id: "art_1", path: "/tmp/matter.xlsx", kind: "xlsx", sizeBytes: 100 }];
+  const updated = store.update(task.id, { artifacts });
+  assert.equal(updated.artifacts.length, 1);
+  assert.equal(updated.artifacts[0].path, "/tmp/matter.xlsx");
+  const fetched = store.get(task.id);
+  assert.equal(fetched.artifacts.length, 1);
+});
+
+test("TaskStore.listByType filters by taskType and artifact presence", () => {
+  const store = new TaskStore();
+  const a = store.create({ prompt: "a", taskType: "disputes" });
+  store.update(a.id, { status: "completed", artifacts: [{ id: "x", path: "/tmp/a.xlsx" }] });
+  const b = store.create({ prompt: "b", taskType: "disputes" });
+  store.update(b.id, { status: "completed" }); // no artifacts
+  const c = store.create({ prompt: "c", taskType: "coding" });
+  store.update(c.id, { status: "completed", artifacts: [{ id: "y", path: "/tmp/c.xlsx" }] });
+
+  const disputesWithArtifacts = store.listByType("disputes", { withArtifacts: true, status: "completed" });
+  assert.equal(disputesWithArtifacts.length, 1);
+  assert.equal(disputesWithArtifacts[0].id, a.id);
+});
+
+test("TaskStore.listByType respects limit and sorts by updatedAt desc", async () => {
+  const store = new TaskStore();
+  const first = store.create({ prompt: "first", taskType: "research" });
+  store.update(first.id, { status: "completed", artifacts: [{ id: "1" }] });
+  // Small delay to ensure updatedAt differs
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = store.create({ prompt: "second", taskType: "research" });
+  store.update(second.id, { status: "completed", artifacts: [{ id: "2" }] });
+
+  const list = store.listByType("research", { withArtifacts: true, limit: 1 });
+  assert.equal(list.length, 1);
+  // Second task was updated later, so it comes first
+  assert.equal(list[0].id, second.id);
+});

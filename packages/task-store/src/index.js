@@ -22,6 +22,7 @@ const DEFAULT_TASK = {
   agentRuns: [],
   toolActivity: [],
   toolTrace: [],
+  artifacts: [],
   audit: [],
   createdAt: null,
   updatedAt: null,
@@ -87,6 +88,21 @@ export class TaskStore {
     let list = [...this.tasks.values()];
     if (filters.status) {
       list = list.filter((t) => t.status === filters.status);
+    }
+    list.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    if (filters.limit != null) {
+      list = list.slice(0, filters.limit);
+    }
+    return list;
+  }
+
+  listByType(taskType, filters = {}) {
+    let list = [...this.tasks.values()].filter((t) => t.taskType === taskType);
+    if (filters.status) {
+      list = list.filter((t) => t.status === filters.status);
+    }
+    if (filters.withArtifacts) {
+      list = list.filter((t) => Array.isArray(t.artifacts) && t.artifacts.length > 0);
     }
     list.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
     if (filters.limit != null) {
