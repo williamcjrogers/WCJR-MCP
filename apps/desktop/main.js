@@ -1784,6 +1784,97 @@ async function sendTelegramTaskManagerUpdate(taskId, text) {
 }
 
 /**
+ * L3a: Unified task-update dispatch. Every new code path that reports
+ * task progress, errors, artifacts, or completion should funnel through
+ * here instead of calling IPC and messagingBridge separately.
+ *
+ * This is the single completion hook for ambient sources. It never throws —
+ * channel-specific errors are logged and the caller's loop continues.
+ *
+ * Existing call sites that still call sendTelegramTaskManagerUpdate directly
+ * remain functional for backward compatibility; new code should prefer this.
+ *
+ * @param {string} taskId
+ * @param {object} update
+ * @param {"progress"|"status"|"done"|"error"} update.type
+ * @param {string} [update.text]     For progress/status/done messages.
+ * @param {object} [update.summary]  For done events — full task summary.
+ * @param {string} [update.error]    For error events.
+ */
+async function routeTaskUpdate(taskId, update) {
+  if (!taskId || !update || typeof update !== "object") return;
+
+  // ── Desktop renderer always receives every update ──
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (update.type === "done" && update.summary) {
+        mainWindow.webContents.send("assistant:streamDone", {
+          ...update.summary,
+          taskId
+        });
+      } else if (update.type === "error") {
+        mainWindow.webContents.send("assistant:streamError", {
+          error: update.error,
+          taskId
+        });
+      } else {
+        mainWindow.webContents.send("assistant:taskUpdated", {
+          taskId,
+          update
+        });
+      }
+    }
+  } catch (err) {
+    console.warn("[routeTaskUpdate] desktop IPC dispatch failed:", err?.message ?? err);
+  }
+
+  // ── Channel-specific routing based on remoteOrigin ──
+  const remoteOrigin = getTaskRemoteOrigin(taskId);
+  if (!remoteOrigin) return;
+
+  try {
+    if (remoteOrigin.channel === "telegram" || remoteOrigin.channel === "whatsapp") {
+      // For L3a, messaging updates use the existing sendTelegramTaskManagerUpdate
+      // helper (which despite its name handles both Telegram and WhatsApp via
+      // messagingBridge.sendUpdate). This preserves the existing throttle and
+      // formatting behaviour. Only "done" and "error" events need routing here;
+      // progress updates during execution still flow through the existing
+      // telegramThrottle.maybeSend() path inside taskContext.onProgress.
+      if (update.type === "done" && update.summary) {
+        const text = buildTelegramManagerText({
+          requestText: update.summary.prompt ?? "",
+          summary: { content: update.summary.content ?? "" },
+          metadata: {
+            model: update.summary.model ?? null,
+            provider: update.summary.provider ?? null,
+            elapsedMs: update.summary.elapsedMs ?? 0,
+            agentRuns: update.summary.agentRuns ?? [],
+            toolCount: (update.summary.toolActivity ?? []).length
+          }
+        });
+        await sendTelegramTaskManagerUpdate(taskId, text);
+      } else if (update.type === "error") {
+        const text = buildTelegramManagerFallback({
+          requestText: update.summary?.prompt ?? "",
+          summary: { error: update.error },
+          metadata: {}
+        });
+        await sendTelegramTaskManagerUpdate(taskId, text);
+      }
+    } else if (remoteOrigin.channel === "webhook") {
+      // Webhook replies are handled by the HTTP response handler's own
+      // completion listener (see Task 3). routeTaskUpdate is a no-op for
+      // webhook tasks today; callbackUrl support is L3b.
+    }
+  } catch (err) {
+    console.warn(
+      `[routeTaskUpdate] channel '${remoteOrigin.channel}' dispatch failed:`,
+      err?.message ?? err
+    );
+  }
+}
+
+/**
  * Push a short operational status update to messaging (WhatsApp/Telegram).
  * Used for proactive notifications — not full responses.
  */
