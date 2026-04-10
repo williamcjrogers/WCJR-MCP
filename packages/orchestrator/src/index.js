@@ -1539,15 +1539,29 @@ export class Orchestrator {
         detail: `Iterative plan ${iterativeResult.outcome} (${iterativeResult.ledger?.budget?.phasesUsed ?? 0} phases)`
       });
 
+      const ledgerToolTraces = (iterativeResult.ledger?.phases ?? []).flatMap(
+        (p) => (p.toolTrace ?? []).map((entry) => ({ ...entry, agentName: p.id }))
+      );
+      const mergedToolTrace = [...toolTrace, ...ledgerToolTraces];
+      const mergedToolActivity = [
+        ...toolActivity,
+        ...summarizeToolTrace(ledgerToolTraces)
+      ];
+      const agentRuns = (iterativeResult.ledger?.phases ?? []).map((p) => ({
+        agentName: p.id,
+        content: p.intent ?? ""
+      }));
+
       return {
         taskType: resolvedTaskType,
         model: selectedModel,
         provider: providerId,
         content: iterativeResult.content,
+        agentRuns,
         timeline,
         toolSummary,
-        toolActivity,
-        toolTrace,
+        toolActivity: mergedToolActivity,
+        toolTrace: mergedToolTrace,
         runMode,
         fallbackChain,
         pendingApproval: iterativeResult.pendingApproval ?? false,
