@@ -1067,6 +1067,33 @@ export class Orchestrator {
       });
     }
 
+    // ── Prior lessons from memory store (L0 lesson-writer retrieval) ──
+    if (this.options.memoryStore && typeof this.options.memoryStore.search === "function") {
+      try {
+        const candidates = this.options.memoryStore.search(
+          `run_lesson ${resolvedTaskType}`,
+          { limit: 10 }
+        );
+        const lessons = (candidates ?? [])
+          .filter((m) => m?.category === "run_lesson")
+          .slice(0, 3);
+        if (lessons.length > 0) {
+          const lessonBlock = lessons
+            .map((m, i) => `${i + 1}. ${m.content}`)
+            .join("\n");
+          contextSections.push(
+            `PRIOR LESSONS (from previous runs of this task type):\n${lessonBlock}`
+          );
+          timeline.push({
+            stage: "lessons",
+            detail: `Injected ${lessons.length} prior lesson(s) from memory store`
+          });
+        }
+      } catch (err) {
+        console.warn("[orchestrator] failed to fetch prior lessons:", err?.message ?? err);
+      }
+    }
+
     return { toolSummary, toolActivity, contextSections };
   }
 
