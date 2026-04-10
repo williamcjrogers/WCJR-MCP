@@ -344,11 +344,16 @@ export async function runIterativePlan({
       endedAt: null
     };
 
-    // ── Execute all phases in this batch sequentially (Task 3 upgrades to Promise.all) ──
-    const batchResults = [];
-    for (const phase of batch) {
+    // ── L2: execute all phases in the batch in parallel, with per-batch cancellation ──
+    const controller = new AbortController();
+
+    if (batch.length > 1) {
+      emitStatus?.(`Running batch ${batchIndex + 1}/${batches.length} — ${batch.length} phases in parallel...`);
+    }
+
+    const batchPromises = batch.map((phase) => {
       totalPhasesExecuted += 1;
-      const result = await runPhase(phase, {
+      return runPhase(phase, {
         phases,
         phaseIndex: phases.indexOf(phase),
         originalGoal,
@@ -367,10 +372,15 @@ export async function runIterativePlan({
         batchIndex,
         batchSize: batch.length,
         totalPhases: phases.length,
-        signal: undefined
+        signal: controller.signal
       });
+    });
+
+    const batchResults = await Promise.all(batchPromises);
+
+    // Push all phase entries to the ledger in batch order
+    for (const result of batchResults) {
       ledger.phases.push(result.phaseEntry);
-      batchResults.push(result);
       if (result.phaseEntry.content) {
         lastContent = result.phaseEntry.content;
       }
@@ -384,6 +394,7 @@ export async function runIterativePlan({
     // 1. Any error → terminate as failed
     const erroredResult = batchResults.find((r) => r.phaseEntry.status === "error");
     if (erroredResult) {
+      controller.abort();
       const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
       ledger.artifacts = mergeArtifactHistory(allArtifacts);
       ledger.outcome = "failed";
@@ -402,6 +413,7 @@ export async function runIterativePlan({
     // 2. Any retry exhausted → force escalate
     const retryExhausted = batchResults.find((r) => r.phaseEntry.status === "retry_exhausted");
     if (retryExhausted) {
+      controller.abort();
       retryExhausted.phaseEntry.status = "escalated";
       emitStatus?.(`Escalating: ${retryExhausted.error}`);
       const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
@@ -422,6 +434,7 @@ export async function runIterativePlan({
     // 3. Any escalate verdict → terminate
     const escalatedResult = batchResults.find((r) => r.verdict?.decision === "escalate");
     if (escalatedResult) {
+      controller.abort();
       emitStatus?.(`Escalating: ${escalatedResult.verdict.escalationReason ?? escalatedResult.verdict.reasoning}`);
       const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
       ledger.artifacts = mergeArtifactHistory(allArtifacts);
