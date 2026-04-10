@@ -80,5 +80,6 @@ contextBridge.exposeInMainWorld("assistantApi", {
   },
   getKnowledgeCollections: () => ipcRenderer.invoke("assistant:getKnowledgeCollections"),
   ingestToKnowledge: (payload) => ipcRenderer.invoke("assistant:ingestToKnowledge", payload),
-  deleteFromKnowledge: (payload) => ipcRenderer.invoke("assistant:deleteFromKnowledge", payload)
+  deleteFromKnowledge: (payload) => ipcRenderer.invoke("assistant:deleteFromKnowledge", payload),
+  revealArtifact: (absolutePath) => ipcRenderer.invoke("shell:revealArtifact", absolutePath)
 });
