@@ -66,3 +66,61 @@ test("writeLesson persists to memory store", async () => {
   assert.ok(written[0].tags.includes("extract_document_text"));
   assert.ok(written[0].content.includes("maxChars:50000"));
 });
+
+test("writeLesson tolerates lesson missing tools_used", async () => {
+  let written = null;
+  const mockMemoryStore = {
+    upsert(entry) {
+      written = entry;
+      return { ...entry, id: "mem_test" };
+    }
+  };
+
+  const result = await writeLesson({
+    memoryStore: mockMemoryStore,
+    lesson: {
+      taskType: "disputes",
+      prompt_gist: "summarize",
+      // tools_used deliberately omitted
+      outcome: "success",
+      what_worked: [],
+      what_failed: [],
+      generalization: "Be concise"
+    }
+  });
+
+  assert.ok(result, "writeLesson should return an entry");
+  assert.deepEqual(written.tags, ["disputes"]);
+});
+
+test("writeLesson returns null when memoryStore.upsert throws", async () => {
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await writeLesson({
+      memoryStore: {
+        upsert() { throw new Error("store corrupted"); }
+      },
+      lesson: {
+        taskType: "disputes",
+        prompt_gist: "summarize",
+        tools_used: [],
+        outcome: "success",
+        what_worked: [],
+        what_failed: [],
+        generalization: "Be concise"
+      }
+    });
+    assert.equal(result, null);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test("parseLesson returns null when taskType is missing", () => {
+  const lesson = parseLesson(JSON.stringify({
+    prompt_gist: "summarize",
+    outcome: "success"
+  }));
+  assert.equal(lesson, null);
+});

@@ -64,24 +64,37 @@ export function parseLesson(raw) {
 
 export async function writeLesson({ memoryStore, lesson }) {
   if (!memoryStore || !lesson) return null;
-  const entry = memoryStore.upsert({
-    category: "run_lesson",
-    content: [
-      `[${lesson.taskType}] ${lesson.prompt_gist}`,
-      `Outcome: ${lesson.outcome}`,
-      lesson.what_worked.length ? `Worked: ${lesson.what_worked.join("; ")}` : "",
-      lesson.what_failed.length ? `Failed: ${lesson.what_failed.join("; ")}` : "",
-      `Generalization: ${lesson.generalization}`
-    ]
-      .filter(Boolean)
-      .join("\n"),
-    tags: [lesson.taskType, ...lesson.tools_used],
-    pinned: false
-  });
-  if (typeof memoryStore.save === "function") {
-    await memoryStore.save();
+  try {
+    const workedLine = Array.isArray(lesson.what_worked) && lesson.what_worked.length
+      ? `Worked: ${lesson.what_worked.join("; ")}`
+      : "";
+    const failedLine = Array.isArray(lesson.what_failed) && lesson.what_failed.length
+      ? `Failed: ${lesson.what_failed.join("; ")}`
+      : "";
+
+    const entry = memoryStore.upsert({
+      category: "run_lesson",
+      content: [
+        `[${lesson.taskType}] ${lesson.prompt_gist ?? ""}`,
+        `Outcome: ${lesson.outcome ?? "unknown"}`,
+        workedLine,
+        failedLine,
+        lesson.generalization ? `Generalization: ${lesson.generalization}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      tags: [lesson.taskType, ...(Array.isArray(lesson.tools_used) ? lesson.tools_used : [])],
+      pinned: false
+    });
+
+    if (typeof memoryStore.save === "function") {
+      await memoryStore.save();
+    }
+    return entry;
+  } catch (err) {
+    console.warn("[lesson-writer] writeLesson failed, skipping:", err?.message ?? err);
+    return null;
   }
-  return entry;
 }
 
 /**
