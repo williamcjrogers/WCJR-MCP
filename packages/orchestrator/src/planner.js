@@ -49,6 +49,203 @@ function applyAmendments(phases, currentIndex, amendments) {
   return result;
 }
 
+/**
+ * Execute a single phase through its retry/critic loop.
+ *
+ * NEVER THROWS. All errors are caught and surfaced via the return shape.
+ *
+ * @returns {Promise<{
+ *   phaseEntry: object,
+ *   verdict: object | null,
+ *   error: string | null,
+ *   cancelled: boolean
+ * }>}
+ */
+async function runPhase(phase, ctx) {
+  const {
+    phases,
+    phaseIndex,
+    originalGoal,
+    taskType,
+    executorModel,
+    workspaceDir,
+    extractArtifactsFn,
+    invokeModel,
+    resolveProvider,
+    criticSelection,
+    emitStatus,
+    maxCriticRounds,
+    systemMessage,
+    conversationMessages,
+    runId,
+    batchIndex,
+    batchSize,
+    totalPhases,
+    signal
+  } = ctx;
+
+  const phaseStartedAt = Date.now();
+  const phaseNum = phaseIndex + 1;
+
+  const phaseEntry = {
+    id: phase.id,
+    intent: phase.title ?? phase.prompt,
+    executorModel: null,
+    criticModel: criticSelection?.model ?? null,
+    attempts: 0,
+    status: "running",
+    criticVerdicts: [],
+    durationMs: 0,
+    batchIndex,
+    batchSize,
+    _insertedBy: phase._insertedBy ?? null
+  };
+
+  let lastContent = "";
+  let lastVerdict = null;
+  let retryGuidance = null;
+  let accepted = false;
+
+  for (let attempt = 0; attempt < maxCriticRounds; attempt += 1) {
+    if (signal?.aborted) {
+      phaseEntry.status = "cancelled";
+      phaseEntry.error = "cancelled by sibling failure";
+      phaseEntry.durationMs = Date.now() - phaseStartedAt;
+      return { phaseEntry, verdict: null, error: null, cancelled: true };
+    }
+
+    phaseEntry.attempts = attempt + 1;
+    emitStatus?.(`Running phase ${phaseNum}/${totalPhases}: ${phase.title ?? phase.prompt}...`);
+
+    const phaseModel = phase.modelOverride ?? executorModel ?? "gpt-5.4";
+    const providerId = resolveProvider?.(phaseModel) ?? "openai";
+    phaseEntry.executorModel = phaseModel;
+
+    const retryNote = retryGuidance
+      ? `\n\nIMPORTANT — RETRY GUIDANCE from the critic: ${retryGuidance}`
+      : "";
+    const phasePrompt = `${phase.prompt}${retryNote}`;
+
+    let result;
+    try {
+      result = await invokeModel({
+        providerId,
+        model: phaseEntry.executorModel,
+        prompt: phasePrompt,
+        messages: [
+          { role: "system", content: systemMessage ?? "You are a capable assistant." },
+          ...(conversationMessages ?? []),
+          { role: "user", content: phasePrompt }
+        ],
+        taskType: phase.activity ?? taskType,
+        taskContext: {},
+        suppressStream: true,
+        signal
+      });
+    } catch (err) {
+      // Abort signal or provider failure
+      if (signal?.aborted) {
+        phaseEntry.status = "cancelled";
+        phaseEntry.error = "cancelled by sibling failure";
+        phaseEntry.durationMs = Date.now() - phaseStartedAt;
+        return { phaseEntry, verdict: null, error: null, cancelled: true };
+      }
+      console.error(`[planner] phase ${phase.id} failed:`, err?.message ?? err);
+      phaseEntry.status = "error";
+      phaseEntry.error = err?.message ?? String(err);
+      phaseEntry.durationMs = Date.now() - phaseStartedAt;
+      return { phaseEntry, verdict: null, error: phaseEntry.error, cancelled: false };
+    }
+
+    lastContent = result?.content ?? "";
+    const phaseToolTrace = result?.toolTrace ?? [];
+    phaseEntry.toolTrace = phaseToolTrace;
+
+    // Artifact extraction (L1)
+    const phaseEndedAt = Date.now();
+    try {
+      phaseEntry.artifacts = await extractArtifactsFn({
+        phaseToolTrace,
+        workspaceDir,
+        phaseId: phase.id,
+        runId,
+        phaseStartedAt,
+        phaseEndedAt
+      });
+    } catch (extractErr) {
+      console.warn(`[planner] artifact extraction failed for ${phase.id}:`, extractErr?.message ?? extractErr);
+      phaseEntry.artifacts = [];
+    }
+
+    if (signal?.aborted) {
+      phaseEntry.status = "cancelled";
+      phaseEntry.error = "cancelled by sibling failure";
+      phaseEntry.durationMs = Date.now() - phaseStartedAt;
+      return { phaseEntry, verdict: null, error: null, cancelled: true };
+    }
+
+    // Critic
+    if (criticSelection) {
+      emitStatus?.(`Critic reviewing phase ${phaseNum} (${criticSelection.model})...`);
+      const verdict = await runCritic({
+        invokeModel,
+        criticModel: criticSelection.model,
+        criticProvider: criticSelection.provider,
+        originalGoal,
+        taskType,
+        planSummary: summarizePlan(phases, phaseIndex),
+        phaseId: phase.id,
+        phaseIntent: phase.title ?? phase.prompt,
+        phaseResult: lastContent.slice(0, 3000),
+        toolTraceSummary: summarizeToolTrace(phaseToolTrace),
+        artifacts: phaseEntry.artifacts
+      });
+
+      phaseEntry.criticVerdicts.push(verdict);
+      lastVerdict = verdict;
+
+      if (verdict.decision === "accept") {
+        emitStatus?.(`Phase ${phaseNum} accepted — advancing...`);
+        phaseEntry.status = "accepted";
+        accepted = true;
+        break;
+      }
+
+      if (verdict.decision === "retry_phase") {
+        retryGuidance = verdict.retryGuidance ?? verdict.reasoning;
+        emitStatus?.(`Retrying phase ${phaseNum} (attempt ${attempt + 2}/${maxCriticRounds})...`);
+        continue;
+      }
+
+      // amend_plan or escalate: caller handles reconciliation
+      phaseEntry.status = verdict.decision === "escalate" ? "escalated" : "accepted";
+      accepted = verdict.decision === "amend_plan";
+      phaseEntry.content = lastContent;
+      phaseEntry.durationMs = Date.now() - phaseStartedAt;
+      return { phaseEntry, verdict, error: null, cancelled: false };
+    }
+
+    // No critic — optimistic accept
+    phaseEntry.status = "accepted";
+    accepted = true;
+    break;
+  }
+
+  // Retry budget exhausted — the caller will force-escalate
+  if (!accepted) {
+    const reason = `Retry budget exhausted for phase ${phase.id} after ${phaseEntry.attempts} attempts — last critic reasoning: ${lastVerdict?.reasoning ?? "unknown"}`;
+    phaseEntry.status = "retry_exhausted";
+    phaseEntry.error = reason;
+    phaseEntry.content = lastContent;
+    phaseEntry.durationMs = Date.now() - phaseStartedAt;
+    return { phaseEntry, verdict: lastVerdict, error: reason, cancelled: false };
+  }
+
+  phaseEntry.content = lastContent;
+  phaseEntry.durationMs = Date.now() - phaseStartedAt;
+  return { phaseEntry, verdict: lastVerdict, error: null, cancelled: false };
+}
+
 export async function runIterativePlan({
   plan,
   originalGoal,
@@ -101,200 +298,104 @@ export async function runIterativePlan({
       break;
     }
 
-    const phaseStartedAt = Date.now();
+    const phase = phases[phaseIndex];
     totalPhasesExecuted += 1;
 
-    const phase = phases[phaseIndex];
-    const phaseNum = phaseIndex + 1;
-    const totalPhases = phases.length;
-    const phaseEntry = {
-      id: phase.id,
-      intent: phase.title ?? phase.prompt,
-      executorModel: null,
-      criticModel: criticSelection?.model ?? null,
-      attempts: 0,
-      status: "running",
-      criticVerdicts: [],
-      durationMs: 0,
-      _insertedBy: phase._insertedBy ?? null
-    };
-    ledger.phases.push(phaseEntry);
+    const result = await runPhase(phase, {
+      phases,
+      phaseIndex,
+      originalGoal,
+      taskType,
+      executorModel,
+      workspaceDir,
+      extractArtifactsFn,
+      invokeModel,
+      resolveProvider,
+      criticSelection,
+      emitStatus,
+      maxCriticRounds,
+      systemMessage,
+      conversationMessages,
+      runId: plan.taskId ?? "adhoc",
+      batchIndex: 0,
+      batchSize: 1,
+      totalPhases: phases.length,
+      signal: undefined
+    });
 
-    let accepted = false;
-    let retryGuidance = null;
-
-    for (let attempt = 0; attempt < maxCriticRounds; attempt += 1) {
-      phaseEntry.attempts = attempt + 1;
-
-      emitStatus?.(`Running phase ${phaseNum}/${totalPhases}: ${phase.title ?? phase.prompt}...`);
-
-      // Resolve a provider for this phase
-      const phaseModel = phase.modelOverride ?? executorModel ?? "gpt-5.4";
-      const providerId = resolveProvider?.(phaseModel) ?? "openai";
-      phaseEntry.executorModel = phaseModel;
-
-      // Build messages for the phase
-      const retryNote = retryGuidance
-        ? `\n\nIMPORTANT — RETRY GUIDANCE from the critic: ${retryGuidance}`
-        : "";
-      const phasePrompt = `${phase.prompt}${retryNote}`;
-
-      try {
-        const result = await invokeModel({
-          providerId,
-          model: phaseEntry.executorModel,
-          prompt: phasePrompt,
-          messages: [
-            { role: "system", content: systemMessage ?? "You are a capable assistant." },
-            ...(conversationMessages ?? []),
-            { role: "user", content: phasePrompt }
-          ],
-          taskType: phase.activity ?? taskType,
-          taskContext: {},
-          suppressStream: true
-        });
-
-        lastContent = result?.content ?? "";
-        const phaseToolTrace = result?.toolTrace ?? [];
-        phaseEntry.toolTrace = phaseToolTrace;
-
-        // ── L1: extract artifacts produced by this phase ──
-        const phaseEndedAt = Date.now();
-        try {
-          phaseEntry.artifacts = await extractArtifactsFn({
-            phaseToolTrace,
-            workspaceDir,
-            phaseId: phase.id,
-            runId: plan.taskId ?? "adhoc",
-            phaseStartedAt,
-            phaseEndedAt
-          });
-        } catch (extractErr) {
-          console.warn(`[planner] artifact extraction failed for ${phase.id}:`, extractErr?.message ?? extractErr);
-          phaseEntry.artifacts = [];
-        }
-
-        // Run the critic
-        if (criticSelection) {
-          emitStatus?.(`Critic reviewing phase ${phaseNum} (${criticSelection.model})...`);
-          const verdict = await runCritic({
-            invokeModel,
-            criticModel: criticSelection.model,
-            criticProvider: criticSelection.provider,
-            originalGoal,
-            taskType,
-            planSummary: summarizePlan(phases, phaseIndex),
-            phaseId: phase.id,
-            phaseIntent: phase.title ?? phase.prompt,
-            phaseResult: lastContent.slice(0, 3000),
-            toolTraceSummary: summarizeToolTrace(phaseToolTrace),
-            artifacts: phaseEntry.artifacts
-          });
-
-          phaseEntry.criticVerdicts.push(verdict);
-
-          if (verdict.decision === "accept") {
-            emitStatus?.(`Phase ${phaseNum} accepted — advancing...`);
-            phaseEntry.status = "accepted";
-            accepted = true;
-            break;
-          }
-
-          if (verdict.decision === "retry_phase") {
-            retryGuidance = verdict.retryGuidance ?? verdict.reasoning;
-            emitStatus?.(`Retrying phase ${phaseNum} (attempt ${attempt + 2}/${maxCriticRounds})...`);
-            continue;
-          }
-
-          if (verdict.decision === "amend_plan") {
-            let amended;
-            try {
-              amended = applyAmendments(phases, phaseIndex, verdict.amendments);
-            } catch (err) {
-              console.error("[planner] amendment application failed, treating as accept:", err);
-              amended = phases;
-            }
-            const addedCount = amended.length - phases.length;
-            phases = amended;
-            emitStatus?.(`Amending plan (${addedCount > 0 ? `+${addedCount}` : addedCount} phases)...`);
-            phaseEntry.status = "accepted";
-            accepted = true;
-            break;
-          }
-
-          if (verdict.decision === "escalate") {
-            emitStatus?.(`Escalating: ${verdict.escalationReason ?? verdict.reasoning}`);
-            phaseEntry.status = "escalated";
-            ledger.outcome = "escalated";
-            ledger.endedAt = Date.now();
-            ledger.budget.wallClockMs = Date.now() - startedAt;
-            ledger.budget.phasesUsed = totalPhasesExecuted;
-            const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
-            ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
-            return {
-              outcome: "escalated",
-              content: lastContent,
-              pendingApproval: true,
-              escalationReason: verdict.escalationReason ?? verdict.reasoning,
-              ledger
-            };
-          }
-        } else {
-          // No critic available — optimistic accept
-          phaseEntry.status = "accepted";
-          accepted = true;
-          break;
-        }
-      } catch (err) {
-        console.error(`[planner] phase ${phase.id} failed:`, err?.message ?? err);
-        phaseEntry.status = "error";
-        phaseEntry.error = err?.message ?? String(err);
-        break;
-      }
+    ledger.phases.push(result.phaseEntry);
+    if (result.phaseEntry.content) {
+      lastContent = result.phaseEntry.content;
     }
 
-    // Retry budget exhausted — force escalate
-    if (!accepted && phaseEntry.status === "running") {
-      const lastVerdict = phaseEntry.criticVerdicts[phaseEntry.criticVerdicts.length - 1];
-      const reason = `Retry budget exhausted for phase ${phase.id} after ${phaseEntry.attempts} attempts — last critic reasoning: ${lastVerdict?.reasoning ?? "unknown"}`;
-      emitStatus?.(`Escalating: ${reason}`);
-      phaseEntry.status = "escalated";
-      phaseEntry.durationMs = Date.now() - phaseStartedAt;
-      ledger.outcome = "escalated";
-      ledger.endedAt = Date.now();
-      ledger.budget.wallClockMs = Date.now() - startedAt;
-      ledger.budget.phasesUsed = totalPhasesExecuted;
+    // Execution error → terminate failed
+    if (result.phaseEntry.status === "error") {
       const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
       ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
-      return {
-        outcome: "escalated",
-        content: lastContent,
-        pendingApproval: true,
-        escalationReason: reason,
-        ledger
-      };
-    }
-
-    // Execution error — terminate as failed (spec §9 outcome)
-    if (phaseEntry.status === "error") {
-      emitStatus?.(`Phase ${phaseNum} failed: ${phaseEntry.error} — terminating run`);
-      phaseEntry.durationMs = Date.now() - phaseStartedAt;
       ledger.outcome = "failed";
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
       ledger.budget.phasesUsed = totalPhasesExecuted;
-      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
-      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
       return {
         outcome: "failed",
         content: lastContent,
         pendingApproval: false,
-        error: phaseEntry.error,
+        error: result.phaseEntry.error,
         ledger
       };
     }
 
-    phaseEntry.durationMs = Date.now() - phaseStartedAt;
+    // Retry exhausted → force escalate
+    if (result.phaseEntry.status === "retry_exhausted") {
+      emitStatus?.(`Escalating: ${result.error}`);
+      result.phaseEntry.status = "escalated";
+      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
+      ledger.outcome = "escalated";
+      ledger.endedAt = Date.now();
+      ledger.budget.wallClockMs = Date.now() - startedAt;
+      ledger.budget.phasesUsed = totalPhasesExecuted;
+      return {
+        outcome: "escalated",
+        content: lastContent,
+        pendingApproval: true,
+        escalationReason: result.error,
+        ledger
+      };
+    }
+
+    // Critic verdict: escalate → terminate
+    if (result.verdict?.decision === "escalate") {
+      emitStatus?.(`Escalating: ${result.verdict.escalationReason ?? result.verdict.reasoning}`);
+      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
+      ledger.outcome = "escalated";
+      ledger.endedAt = Date.now();
+      ledger.budget.wallClockMs = Date.now() - startedAt;
+      ledger.budget.phasesUsed = totalPhasesExecuted;
+      return {
+        outcome: "escalated",
+        content: lastContent,
+        pendingApproval: true,
+        escalationReason: result.verdict.escalationReason ?? result.verdict.reasoning,
+        ledger
+      };
+    }
+
+    // Critic verdict: amend_plan → apply amendments, continue
+    if (result.verdict?.decision === "amend_plan") {
+      let amended;
+      try {
+        amended = applyAmendments(phases, phaseIndex, result.verdict.amendments);
+      } catch (err) {
+        console.error("[planner] amendment application failed, treating as accept:", err);
+        amended = phases;
+      }
+      const addedCount = amended.length - phases.length;
+      phases = amended;
+      emitStatus?.(`Amending plan (${addedCount > 0 ? `+${addedCount}` : addedCount} phases)...`);
+    }
+
     phaseIndex += 1;
   }
 
