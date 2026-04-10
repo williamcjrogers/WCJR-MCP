@@ -189,7 +189,10 @@ async function sniffBinaryPreview(absPath, sizeBytes) {
       await handle.close();
     }
   } catch {
-    return { previewKind: "skipped-timeout", preview: null };
+    // Non-timeout I/O errors (ENOENT, EACCES, etc.). Actual timeouts are
+    // handled upstream by safeLstat returning null, so execution never
+    // reaches this catch on a real timeout.
+    return { previewKind: "skipped-error", preview: null };
   }
 }
 
