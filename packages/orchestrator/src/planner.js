@@ -17,20 +17,28 @@ function summarizeToolTrace(trace = []) {
     .join("\n");
 }
 
+function isValidPhase(phase) {
+  return phase && typeof phase === "object" && typeof phase.id === "string" && typeof phase.prompt === "string";
+}
+
 function applyAmendments(phases, currentIndex, amendments) {
   if (!Array.isArray(amendments) || !amendments.length) return phases;
   let result = [...phases];
   for (const amendment of amendments) {
-    if (amendment.action === "insert_phase" && amendment.phase) {
+    if (amendment.action === "insert_phase") {
+      if (!isValidPhase(amendment.phase)) {
+        console.warn("[planner] ignoring insert_phase with invalid phase:", amendment.phase);
+        continue;
+      }
       const afterIdx = result.findIndex((p) => p.id === amendment.after);
       const insertAt = afterIdx >= 0 ? afterIdx + 1 : currentIndex + 1;
       result.splice(insertAt, 0, {
         ...amendment.phase,
         _insertedBy: `critic@${phases[currentIndex]?.id ?? "unknown"}`
       });
-    } else if (amendment.action === "replace_phase" && amendment.phase && amendment.phaseId) {
+    } else if (amendment.action === "replace_phase" && amendment.phaseId) {
       const idx = result.findIndex((p) => p.id === amendment.phaseId);
-      if (idx >= 0) {
+      if (idx >= 0 && amendment.phase && typeof amendment.phase === "object") {
         result[idx] = { ...result[idx], ...amendment.phase };
       }
     } else if (amendment.action === "drop_phase" && amendment.phaseId) {
@@ -88,6 +96,9 @@ export async function runIterativePlan({
       break;
     }
 
+    const phaseStartedAt = Date.now();
+    totalPhasesExecuted += 1;
+
     const phase = phases[phaseIndex];
     const phaseNum = phaseIndex + 1;
     const totalPhases = phases.length;
@@ -109,7 +120,6 @@ export async function runIterativePlan({
 
     for (let attempt = 0; attempt < maxCriticRounds; attempt += 1) {
       phaseEntry.attempts = attempt + 1;
-      totalPhasesExecuted += 1;
 
       emitStatus?.(`Running phase ${phaseNum}/${totalPhases}: ${phase.title ?? phase.prompt}...`);
 
@@ -141,6 +151,7 @@ export async function runIterativePlan({
 
         lastContent = result?.content ?? "";
         const phaseToolTrace = result?.toolTrace ?? [];
+        phaseEntry.toolTrace = phaseToolTrace;
 
         // Run the critic
         if (criticSelection) {
@@ -174,7 +185,13 @@ export async function runIterativePlan({
           }
 
           if (verdict.decision === "amend_plan") {
-            const amended = applyAmendments(phases, phaseIndex, verdict.amendments);
+            let amended;
+            try {
+              amended = applyAmendments(phases, phaseIndex, verdict.amendments);
+            } catch (err) {
+              console.error("[planner] amendment application failed, treating as accept:", err);
+              amended = phases;
+            }
             const addedCount = amended.length - phases.length;
             phases = amended;
             emitStatus?.(`Amending plan (${addedCount > 0 ? `+${addedCount}` : addedCount} phases)...`);
@@ -218,6 +235,7 @@ export async function runIterativePlan({
       const reason = `Retry budget exhausted for phase ${phase.id} after ${phaseEntry.attempts} attempts — last critic reasoning: ${lastVerdict?.reasoning ?? "unknown"}`;
       emitStatus?.(`Escalating: ${reason}`);
       phaseEntry.status = "escalated";
+      phaseEntry.durationMs = Date.now() - phaseStartedAt;
       ledger.outcome = "escalated";
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
@@ -231,7 +249,24 @@ export async function runIterativePlan({
       };
     }
 
-    phaseEntry.durationMs = Date.now() - startedAt;
+    // Execution error — terminate as failed (spec §9 outcome)
+    if (phaseEntry.status === "error") {
+      emitStatus?.(`Phase ${phaseNum} failed: ${phaseEntry.error} — terminating run`);
+      phaseEntry.durationMs = Date.now() - phaseStartedAt;
+      ledger.outcome = "failed";
+      ledger.endedAt = Date.now();
+      ledger.budget.wallClockMs = Date.now() - startedAt;
+      ledger.budget.phasesUsed = totalPhasesExecuted;
+      return {
+        outcome: "failed",
+        content: lastContent,
+        pendingApproval: false,
+        error: phaseEntry.error,
+        ledger
+      };
+    }
+
+    phaseEntry.durationMs = Date.now() - phaseStartedAt;
     phaseIndex += 1;
   }
 

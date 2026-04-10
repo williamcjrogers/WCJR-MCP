@@ -152,3 +152,45 @@ test("planner terminates on budget exhaustion", async () => {
   assert.equal(result.outcome, "budget_exhausted");
   assert.ok(result.content.length > 0, "should return last-known-good content");
 });
+
+test("planner terminates as failed when invokeModel throws", async () => {
+  let call = 0;
+  const result = await runIterativePlan({
+    plan: makePlan([{ id: "p1" }, { id: "p2" }]),
+    originalGoal: "Test goal",
+    taskType: "research",
+    invokeModel: async () => {
+      call += 1;
+      if (call === 1) throw new Error("boom");
+      return { content: "should not reach" };
+    },
+    resolveProvider: () => "openai",
+    hasApiKey: () => true,
+    getCriticModel: () => ({ model: "gemini-2.5-pro", provider: "gemini" }),
+    emitStatus: () => {},
+    onChunk: () => {},
+    budget: { maxCriticRoundsPerPhase: 2, maxTotalPhases: 12, maxWallClockMs: 60000, maxTokensTotal: 400000 }
+  });
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.ledger.phases.length, 1);
+  assert.equal(result.ledger.phases[0].status, "error");
+  assert.ok(result.error.includes("boom"));
+});
+
+test("planner optimistically accepts when getCriticModel returns null", async () => {
+  const result = await runIterativePlan({
+    plan: makePlan([{ id: "p1" }]),
+    originalGoal: "Test goal",
+    taskType: "research",
+    invokeModel: mockInvoker([{ content: "p1 done" }]),
+    resolveProvider: () => "openai",
+    hasApiKey: () => true,
+    getCriticModel: () => null,
+    emitStatus: () => {},
+    onChunk: () => {},
+    budget: { maxCriticRoundsPerPhase: 2, maxTotalPhases: 12, maxWallClockMs: 60000, maxTokensTotal: 400000 }
+  });
+  assert.equal(result.outcome, "success");
+  assert.equal(result.ledger.phases[0].status, "accepted");
+  assert.equal(result.ledger.phases[0].criticVerdicts.length, 0);
+});
