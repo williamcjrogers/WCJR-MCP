@@ -110,6 +110,8 @@ const els = {
   auditCount: $("#audit-count"),
   auditTrail: $("#audit-trail"),
   runLedgerContainer: $("#run-ledger-container"),
+  artifactsContainer: $("#artifacts-container"),
+  artifactsCount: $("#artifacts-count"),
   taskFilter: $("#task-filter"),
   taskStatusFilter: $("#task-status-filter")
 };
@@ -1437,6 +1439,106 @@ function renderRunLedger(task) {
   container.appendChild(ledgerSection);
 }
 
+function formatArtifactSize(bytes) {
+  if (bytes == null) return "?B";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function renderArtifacts(task) {
+  if (!els.artifactsContainer) return;
+  const artifacts = Array.isArray(task?.artifacts) ? task.artifacts : [];
+  if (els.artifactsCount) {
+    els.artifactsCount.textContent = `${artifacts.length} file${artifacts.length === 1 ? "" : "s"}`;
+  }
+  if (!artifacts.length) {
+    els.artifactsContainer.className = "artifacts-container empty-state";
+    els.artifactsContainer.textContent = "No artifacts produced by this task.";
+    return;
+  }
+
+  els.artifactsContainer.className = "artifacts-container";
+  els.artifactsContainer.innerHTML = "";
+
+  const sorted = [...artifacts].sort((a, b) => {
+    const aTime = new Date(a.lastProducedAt ?? 0).getTime();
+    const bTime = new Date(b.lastProducedAt ?? 0).getTime();
+    return bTime - aTime;
+  });
+
+  for (const art of sorted) {
+    const row = document.createElement("div");
+    row.className = "artifact-row";
+
+    const head = document.createElement("div");
+    head.className = "artifact-row-head";
+
+    const kindBadge = document.createElement("span");
+    kindBadge.className = "artifact-kind-badge";
+    kindBadge.textContent = art.kind ?? "other";
+    head.appendChild(kindBadge);
+
+    const basename = (art.path ?? "").split(/[\\/]/).pop() ?? "(unnamed)";
+    const name = document.createElement("span");
+    name.className = "artifact-name";
+    name.textContent = basename;
+    name.title = art.path ?? "";
+    head.appendChild(name);
+
+    const meta = document.createElement("span");
+    meta.className = "artifact-meta";
+    const phaseLabel = art.producedBy?.[art.producedBy.length - 1]?.phaseId ?? "?";
+    meta.textContent = `${formatArtifactSize(art.sizeBytes)} · ${phaseLabel}`;
+    head.appendChild(meta);
+
+    if (api.revealArtifact && art.path) {
+      const btn = document.createElement("button");
+      btn.className = "artifact-reveal-btn";
+      btn.type = "button";
+      btn.textContent = "Reveal";
+      btn.addEventListener("click", async () => {
+        try {
+          await api.revealArtifact(art.path);
+        } catch (err) {
+          if (typeof logWarn === "function") {
+            logWarn("revealArtifact", err);
+          } else {
+            console.warn("[revealArtifact]", err);
+          }
+        }
+      });
+      head.appendChild(btn);
+    }
+
+    row.appendChild(head);
+
+    if (art.previewKind === "text" && art.preview) {
+      const pre = document.createElement("div");
+      pre.className = "artifact-preview";
+      pre.textContent = art.preview;
+      row.appendChild(pre);
+    } else if (art.previewKind === "skipped-binary") {
+      const hint = document.createElement("div");
+      hint.className = "artifact-preview-hint";
+      hint.textContent = "Binary file — preview unavailable";
+      row.appendChild(hint);
+    } else if (art.previewKind === "skipped-large") {
+      const hint = document.createElement("div");
+      hint.className = "artifact-preview-hint";
+      hint.textContent = "Large file — preview unavailable";
+      row.appendChild(hint);
+    } else if (art.previewKind === "skipped-error" || art.previewKind === "skipped-timeout") {
+      const hint = document.createElement("div");
+      hint.className = "artifact-preview-hint";
+      hint.textContent = "Preview unavailable";
+      row.appendChild(hint);
+    }
+
+    els.artifactsContainer.appendChild(row);
+  }
+}
+
 function renderSelectedTaskDetails() {
   if (els.selectedTaskMeta) {
     els.selectedTaskMeta.textContent = selectedTask
@@ -1450,6 +1552,7 @@ function renderSelectedTaskDetails() {
     renderToolActivity(null);
     renderAuditTrail();
     renderRunLedger(null);
+    renderArtifacts(null);
     return;
   }
 
@@ -1458,6 +1561,7 @@ function renderSelectedTaskDetails() {
   renderToolActivity(selectedTask);
   renderAuditTrail();
   renderRunLedger(selectedTask);
+  renderArtifacts(selectedTask);
 }
 
 async function refreshSelectedTask() {

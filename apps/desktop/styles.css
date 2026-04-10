@@ -1624,3 +1624,93 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
   word-break: break-all;
   color: var(--fg);
 }
+
+.artifacts-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.artifacts-container.empty-state {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
+.artifact-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+
+.artifact-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.artifact-kind-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(100, 150, 200, 0.15);
+  color: var(--accent, #64748b);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.artifact-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-meta {
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.artifact-reveal-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--fg);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.65rem;
+  cursor: pointer;
+}
+
+.artifact-reveal-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.artifact-preview {
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 3px;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.68rem;
+  color: var(--fg);
+}
+
+.artifact-preview-hint {
+  color: var(--muted);
+  font-style: italic;
+}
