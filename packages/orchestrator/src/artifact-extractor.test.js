@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import fs from "node:fs/promises";
+import os from "node:os";
 import {
   PRODUCER_WHITELIST,
   inferKind,
@@ -7,7 +10,10 @@ import {
   extractCandidatePathsFromResult,
   mergeArtifactHistory,
   isPlausibleAbsolutePath,
-  isBlacklistedPath
+  isBlacklistedPath,
+  buildArtifactRecord,
+  scanWorkspaceForNewFiles,
+  extractArtifactsFromPhase
 } from "./artifact-extractor.js";
 
 test("PRODUCER_WHITELIST covers the known file-producing tools", () => {
@@ -143,4 +149,182 @@ test("extractCandidatePathsFromResult regex fallback excludes arg paths for unkn
   });
   // /tmp/input.txt appears in args → excluded; /tmp/output.txt not in args → included
   assert.deepEqual(paths, ["/tmp/output.txt"]);
+});
+
+async function makeTempDir() {
+  return fs.mkdtemp(path.join(os.tmpdir(), "wcjr-l1-test-"));
+}
+
+test("buildArtifactRecord returns a full record for a small text file", async () => {
+  const dir = await makeTempDir();
+  const filePath = path.join(dir, "matter.md");
+  await fs.writeFile(filePath, "# Test\nSome markdown content here.", "utf-8");
+
+  const record = await buildArtifactRecord(filePath, {
+    phaseId: "p1",
+    runId: "task_t1",
+    tool: "write_markdown",
+    toolArgs: {},
+    workspaceDir: dir
+  });
+
+  assert.ok(record);
+  assert.equal(record.runId, "task_t1");
+  assert.equal(record.path, filePath);
+  assert.equal(record.relPath, "matter.md");
+  assert.equal(record.workspaceHit, true);
+  assert.equal(record.kind, "md");
+  assert.ok(record.sizeBytes > 0);
+  assert.equal(record.previewKind, "text");
+  assert.ok(record.preview.includes("# Test"));
+  assert.equal(record.producedBy.length, 1);
+  assert.equal(record.producedBy[0].phaseId, "p1");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("buildArtifactRecord flags binary files with skipped-binary preview", async () => {
+  const dir = await makeTempDir();
+  const filePath = path.join(dir, "image.bin");
+  const binaryBuffer = Buffer.from([0, 1, 2, 3, 0, 255, 128, 0]);
+  await fs.writeFile(filePath, binaryBuffer);
+
+  const record = await buildArtifactRecord(filePath, {
+    phaseId: "p1",
+    runId: "task_t1",
+    tool: "unknown",
+    toolArgs: {},
+    workspaceDir: dir
+  });
+
+  assert.ok(record);
+  assert.equal(record.previewKind, "skipped-binary");
+  assert.equal(record.preview, null);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("buildArtifactRecord flags large files with skipped-large preview", async () => {
+  const dir = await makeTempDir();
+  const filePath = path.join(dir, "big.txt");
+  const big = Buffer.alloc(70 * 1024, 0x61); // 70 KB of 'a'
+  await fs.writeFile(filePath, big);
+
+  const record = await buildArtifactRecord(filePath, {
+    phaseId: "p1",
+    runId: "task_t1",
+    tool: "unknown",
+    toolArgs: {},
+    workspaceDir: dir
+  });
+
+  assert.ok(record);
+  assert.equal(record.previewKind, "skipped-large");
+  assert.equal(record.preview, null);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("buildArtifactRecord rejects blacklisted paths", async () => {
+  const record = await buildArtifactRecord("/etc/passwd", {
+    phaseId: "p1",
+    runId: "task_t1",
+    tool: "unknown",
+    toolArgs: {},
+    workspaceDir: "/tmp"
+  });
+  assert.equal(record, null);
+});
+
+test("buildArtifactRecord sets workspaceHit=false for paths outside workspaceDir", async () => {
+  const dir = await makeTempDir();
+  const outsideDir = await makeTempDir();
+  const filePath = path.join(outsideDir, "outside.txt");
+  await fs.writeFile(filePath, "outside");
+
+  const record = await buildArtifactRecord(filePath, {
+    phaseId: "p1",
+    runId: "task_t1",
+    tool: "unknown",
+    toolArgs: {},
+    workspaceDir: dir
+  });
+
+  assert.ok(record);
+  assert.equal(record.workspaceHit, false);
+  assert.equal(record.relPath, null);
+  await fs.rm(dir, { recursive: true, force: true });
+  await fs.rm(outsideDir, { recursive: true, force: true });
+});
+
+test("scanWorkspaceForNewFiles finds files whose mtime is within the time window", async () => {
+  const dir = await makeTempDir();
+  const filePath = path.join(dir, "new.md");
+  const since = Date.now() - 1000;
+  await fs.writeFile(filePath, "fresh");
+  const until = Date.now() + 2000;
+
+  const found = await scanWorkspaceForNewFiles(dir, since, until);
+  assert.ok(found.includes(filePath));
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("scanWorkspaceForNewFiles ignores files outside the time window", async () => {
+  const dir = await makeTempDir();
+  const filePath = path.join(dir, "old.md");
+  await fs.writeFile(filePath, "old");
+  // Backdate mtime by 1 hour
+  const past = new Date(Date.now() - 60 * 60 * 1000);
+  await fs.utimes(filePath, past, past);
+
+  const sinceRecent = Date.now() - 1000;
+  const untilRecent = Date.now() + 1000;
+  const found = await scanWorkspaceForNewFiles(dir, sinceRecent, untilRecent);
+  assert.ok(!found.includes(filePath));
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("scanWorkspaceForNewFiles recurses into subdirectories up to depth 3", async () => {
+  const dir = await makeTempDir();
+  const sub = path.join(dir, "a", "b");
+  await fs.mkdir(sub, { recursive: true });
+  const filePath = path.join(sub, "deep.txt");
+  const since = Date.now() - 1000;
+  await fs.writeFile(filePath, "deep");
+  const until = Date.now() + 2000;
+
+  const found = await scanWorkspaceForNewFiles(dir, since, until);
+  assert.ok(found.some((p) => p.endsWith("deep.txt")));
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("extractArtifactsFromPhase combines whitelist and mtime scan", async () => {
+  const dir = await makeTempDir();
+  const whitelistPath = path.join(dir, "from-tool.xlsx");
+  const mtimePath = path.join(dir, "from-scan.md");
+
+  const phaseStartedAt = Date.now() - 500;
+  await fs.writeFile(whitelistPath, "fake xlsx");
+  await fs.writeFile(mtimePath, "# scanned");
+  const phaseEndedAt = Date.now() + 500;
+
+  const phaseToolTrace = [
+    {
+      tool: "create_workbook",
+      args: {},
+      result: { outputPath: whitelistPath, sheets: ["S1"] }
+    }
+  ];
+
+  const artifacts = await extractArtifactsFromPhase({
+    phaseToolTrace,
+    workspaceDir: dir,
+    phaseId: "p1",
+    runId: "task_abc",
+    phaseStartedAt,
+    phaseEndedAt
+  });
+
+  const paths = artifacts.map((a) => a.path).sort();
+  assert.ok(paths.includes(whitelistPath));
+  assert.ok(paths.includes(mtimePath));
+  assert.equal(new Set(paths).size, paths.length, "no duplicates");
+  await fs.rm(dir, { recursive: true, force: true });
 });

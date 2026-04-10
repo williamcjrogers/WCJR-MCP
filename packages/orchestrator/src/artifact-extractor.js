@@ -6,6 +6,7 @@
 
 import path from "node:path";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 
 /**
  * Per-tool whitelist: which fields in a tool result JSON contain produced
@@ -136,6 +137,205 @@ export function extractCandidatePathsFromResult({ tool, args, result }) {
   }
 
   return [...candidates];
+}
+
+const LSTAT_TIMEOUT_MS = 500;
+const PREVIEW_SIZE_CAP_BYTES = 64 * 1024;
+const PREVIEW_TEXT_CHARS = 200;
+const BINARY_SNIFF_BYTES = 8 * 1024;
+const SCAN_MAX_DEPTH = 3;
+const ARTIFACT_CAP_PER_PHASE = 50;
+
+function withTimeout(promise, ms, onTimeout) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(onTimeout()), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(onTimeout());
+      }
+    );
+  });
+}
+
+async function safeLstat(absPath) {
+  return withTimeout(fs.lstat(absPath), LSTAT_TIMEOUT_MS, () => null);
+}
+
+async function sniffBinaryPreview(absPath, sizeBytes) {
+  if (sizeBytes > PREVIEW_SIZE_CAP_BYTES) {
+    return { previewKind: "skipped-large", preview: null };
+  }
+  try {
+    const handle = await fs.open(absPath, "r");
+    try {
+      const readSize = Math.min(sizeBytes, BINARY_SNIFF_BYTES);
+      const buffer = Buffer.alloc(readSize);
+      const { bytesRead } = await handle.read(buffer, 0, readSize, 0);
+      for (let i = 0; i < bytesRead; i += 1) {
+        if (buffer[i] === 0) {
+          return { previewKind: "skipped-binary", preview: null };
+        }
+      }
+      // Not binary — read up to preview char cap
+      const text = buffer.slice(0, bytesRead).toString("utf-8");
+      const truncated = text.length > PREVIEW_TEXT_CHARS ? text.slice(0, PREVIEW_TEXT_CHARS) : text;
+      return { previewKind: "text", preview: truncated };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return { previewKind: "skipped-timeout", preview: null };
+  }
+}
+
+export async function buildArtifactRecord(absolutePath, ctx) {
+  if (!absolutePath || typeof absolutePath !== "string") return null;
+  const resolved = path.resolve(absolutePath);
+
+  if (isBlacklistedPath(resolved)) return null;
+
+  const stats = await safeLstat(resolved);
+  if (!stats) return null;
+  if (stats.isSymbolicLink?.()) return null;
+  if (!stats.isFile?.()) return null;
+
+  const sizeBytes = stats.size ?? 0;
+  const nowIso = new Date().toISOString();
+  const mtimeIso = stats.mtime ? new Date(stats.mtime).toISOString() : nowIso;
+
+  let relPath = null;
+  let workspaceHit = false;
+  if (ctx?.workspaceDir) {
+    const rel = path.relative(ctx.workspaceDir, resolved);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      relPath = rel;
+      workspaceHit = true;
+    }
+  }
+
+  const { previewKind, preview } = await sniffBinaryPreview(resolved, sizeBytes);
+
+  return {
+    id: computeArtifactId(ctx?.runId ?? "adhoc", relPath ?? resolved),
+    runId: ctx?.runId ?? "adhoc",
+    path: resolved,
+    relPath,
+    workspaceHit,
+    kind: inferKind(resolved),
+    sizeBytes,
+    preview,
+    previewKind,
+    firstProducedAt: mtimeIso,
+    lastProducedAt: mtimeIso,
+    producedBy: [
+      {
+        phaseId: ctx?.phaseId ?? "unknown",
+        tool: ctx?.tool ?? "unknown",
+        at: mtimeIso,
+        sizeBytes
+      }
+    ]
+  };
+}
+
+export async function scanWorkspaceForNewFiles(workspaceDir, sinceMs, untilMs) {
+  if (!workspaceDir) return [];
+  const results = [];
+
+  async function recurse(dir, depth) {
+    if (depth > SCAN_MAX_DEPTH) return;
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        await recurse(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const stats = await safeLstat(full);
+      if (!stats) continue;
+      const mtimeMs = stats.mtimeMs ?? new Date(stats.mtime ?? 0).getTime();
+      if (mtimeMs >= sinceMs && mtimeMs <= untilMs) {
+        results.push(full);
+      }
+    }
+  }
+
+  await recurse(workspaceDir, 1);
+  return results;
+}
+
+export async function extractArtifactsFromPhase({
+  phaseToolTrace,
+  workspaceDir,
+  phaseId,
+  runId,
+  phaseStartedAt,
+  phaseEndedAt
+}) {
+  const candidatePaths = new Set();
+
+  // Layers 1 + 2: from tool traces
+  for (const entry of phaseToolTrace ?? []) {
+    const result = entry?.result ?? entry?.resultJson ?? null;
+    const args = entry?.args ?? {};
+    const tool = entry?.tool ?? entry?.name ?? "unknown";
+    if (result && typeof result === "object") {
+      const fromTrace = extractCandidatePathsFromResult({ tool, args, result });
+      for (const p of fromTrace) candidatePaths.add(p);
+    }
+  }
+
+  // Layer 3: workspace mtime scan
+  if (workspaceDir) {
+    const since = (phaseStartedAt ?? Date.now()) - 1000;
+    const until = (phaseEndedAt ?? Date.now()) + 2000;
+    const scanned = await scanWorkspaceForNewFiles(workspaceDir, since, until);
+    for (const p of scanned) candidatePaths.add(p);
+  }
+
+  const capped = [...candidatePaths].slice(0, ARTIFACT_CAP_PER_PHASE);
+  if (candidatePaths.size > ARTIFACT_CAP_PER_PHASE) {
+    console.warn(
+      `[artifact-extractor] phase ${phaseId} produced ${candidatePaths.size} candidates, capped at ${ARTIFACT_CAP_PER_PHASE}`
+    );
+  }
+
+  const records = [];
+  for (const absPath of capped) {
+    // Find the tool that produced it (best-effort: first trace entry whose
+    // result contains this exact path, else the scan fallback).
+    let tool = "workspace_scan";
+    let toolArgs = {};
+    for (const entry of phaseToolTrace ?? []) {
+      const result = entry?.result ?? null;
+      if (result && JSON.stringify(result).includes(absPath)) {
+        tool = entry?.tool ?? entry?.name ?? "unknown";
+        toolArgs = entry?.args ?? {};
+        break;
+      }
+    }
+    const record = await buildArtifactRecord(absPath, {
+      phaseId,
+      runId,
+      tool,
+      toolArgs,
+      workspaceDir
+    });
+    if (record) records.push(record);
+  }
+  return records;
 }
 
 /**
