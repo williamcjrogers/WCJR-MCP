@@ -2285,7 +2285,7 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
     prompt: z.string().min(1),
     taskType: z.string().optional(),
     modelOverride: z.string().optional(),
-    runMode: z.enum(["direct", "sandboxed"]).optional(),
+    runMode: z.enum(["direct", "sandboxed", "iterative"]).optional(),
     conversationId: z.string().optional(),
     executionMode: z.enum(["plan_first", "direct"]).optional()
   });
@@ -2316,7 +2316,10 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
       executionPhase = "plan";
     }
   }
-  let resolvedRunMode = runMode ?? "direct";
+  // L3a: ambient sources (remoteOrigin set) default to iterative mode
+  // so Telegram/WhatsApp/webhook tasks get L0-L2 depth (critic, artifacts, parallel).
+  // The desktop Run button (remoteOrigin === null) stays "direct" by default.
+  let resolvedRunMode = runMode ?? (remoteOrigin ? "iterative" : "direct");
   if (resolvedRunMode === "direct" && appConfig.sandboxPreference === "risky") {
     const riskyTypes = new Set(["coding", "automation", "project_mgmt", "data_analysis", "aws_cloud", "documents"]);
     if (riskyTypes.has(resolvedTaskType)) {
