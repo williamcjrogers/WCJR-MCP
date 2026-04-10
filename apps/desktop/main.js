@@ -2180,12 +2180,15 @@ async function invokeAgenticModel({
   });
 }
 
-function createOrchestrator() {
+function createOrchestrator(runsDir) {
   orchestrator = new Orchestrator(appConfig, {
     resolveProvider,
     hasApiKey: async (providerId) => providerId === "ollama" || !!getDecryptedKey(providerId),
     hasApiKeySync: (providerId) => providerId === "ollama" || !!getDecryptedKey(providerId),
     invokeModel: invokeAgenticModel,
+    runsDir,
+    taskStore: getTaskStore(),
+    memoryStore: getMemoryStore(),
     emitStatus: (text) => {
       emitStream({ type: "status", text: `${text}\n\n` });
       emitProgressDetail(parseStatusToDetail(text));
@@ -2462,6 +2465,7 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
       toolActivity: summary?.toolActivity ?? finalTask?.toolActivity ?? [],
       toolTrace: summary?.toolTrace ?? finalTask?.toolTrace ?? [],
       runLedger: summary?.runLedger ?? finalTask?.runLedger ?? null,
+      artifacts: summary?.artifacts ?? finalTask?.artifacts ?? [],
       result: summary?.error ? null : { content: assistantContent || summary?.content, model: summary?.model, provider: summary?.provider },
       error: summary?.error ?? null,
       pendingExecutionPlan: normalizedWorkflowPlan,
@@ -2655,6 +2659,18 @@ async function getWorkspaceStatePayload() {
 }
 
 function registerIpcHandlers() {
+  ipcMain.handle("shell:revealArtifact", async (_evt, absolutePath) => {
+    if (!absolutePath || typeof absolutePath !== "string") {
+      return { ok: false, error: "invalid path" };
+    }
+    try {
+      shell.showItemInFolder(absolutePath);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message ?? String(err) };
+    }
+  });
+
   ipcMain.handle("assistant:getBootstrapState", async () => getBootstrapStatePayload());
 
   ipcMain.handle("assistant:getWorkspaceState", async () => getWorkspaceStatePayload());
@@ -3101,6 +3117,7 @@ function registerIpcHandlers() {
           toolActivity: summary?.toolActivity ?? finalExec?.toolActivity ?? [],
           toolTrace: summary?.toolTrace ?? finalExec?.toolTrace ?? [],
           runLedger: summary?.runLedger ?? finalExec?.runLedger ?? null,
+          artifacts: summary?.artifacts ?? finalExec?.artifacts ?? [],
           result: summary?.error ? null : { content: cleanContent || summary?.content, model: summary?.model, provider: summary?.provider },
           error: summary?.error ?? null,
           status: summary?.error ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED,
@@ -3901,7 +3918,13 @@ if (gotSingleInstanceLock) {
     conversationStore = getConversationStore();
     await conversationStore.load();
     policyEngine = new PolicyEngine(appConfig?.policy ?? {});
-    createOrchestrator();
+    const runsDir = path.join(app.getPath("userData"), "runs");
+    try {
+      await fs.mkdir(runsDir, { recursive: true });
+    } catch (err) {
+      logStartup("failed to create runs dir", err);
+    }
+    createOrchestrator(runsDir);
     await orchestrator.connectMcp();
     orchestrator.startMcpHealthChecks();
     registerIpcHandlers();
