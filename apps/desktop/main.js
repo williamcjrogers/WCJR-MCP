@@ -2460,6 +2460,7 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
       agentRuns: summary?.agentRuns ?? finalTask?.agentRuns ?? [],
       toolActivity: summary?.toolActivity ?? finalTask?.toolActivity ?? [],
       toolTrace: summary?.toolTrace ?? finalTask?.toolTrace ?? [],
+      runLedger: summary?.runLedger ?? finalTask?.runLedger ?? null,
       result: summary?.error ? null : { content: assistantContent || summary?.content, model: summary?.model, provider: summary?.provider },
       error: summary?.error ?? null,
       pendingExecutionPlan: normalizedWorkflowPlan,
@@ -3098,6 +3099,7 @@ function registerIpcHandlers() {
           agentRuns: summary?.agentRuns ?? finalExec?.agentRuns ?? [],
           toolActivity: summary?.toolActivity ?? finalExec?.toolActivity ?? [],
           toolTrace: summary?.toolTrace ?? finalExec?.toolTrace ?? [],
+          runLedger: summary?.runLedger ?? finalExec?.runLedger ?? null,
           result: summary?.error ? null : { content: cleanContent || summary?.content, model: summary?.model, provider: summary?.provider },
           error: summary?.error ?? null,
           status: summary?.error ? TASK_STATUS.FAILED : TASK_STATUS.COMPLETED,
@@ -3521,7 +3523,9 @@ async function startMessagingBridge() {
   if (messagingBridge) {
     try {
       await messagingBridge.disconnect();
-    } catch {}
+    } catch (err) {
+      console.warn("[messaging] disconnect failed during restart:", err?.message ?? err);
+    }
     messagingBridge = null;
   }
   const messaging = appConfig?.messaging ?? {};
@@ -3898,6 +3902,7 @@ if (gotSingleInstanceLock) {
     policyEngine = new PolicyEngine(appConfig?.policy ?? {});
     createOrchestrator();
     await orchestrator.connectMcp();
+    orchestrator.startMcpHealthChecks();
     registerIpcHandlers();
     createWindow();
     await startMessagingBridge();
@@ -3907,6 +3912,9 @@ if (gotSingleInstanceLock) {
 
 app.on("window-all-closed", () => {
   logStartup("All windows closed");
+  if (orchestrator) {
+    orchestrator.stopMcpHealthChecks();
+  }
   if (process.platform !== "darwin") {
     app.quit();
   }

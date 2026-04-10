@@ -5,6 +5,12 @@ const els = {
   statusDot: $("#status-dot"),
   topbarSummary: $("#topbar-summary"),
   errorBanner: $("#error-banner"),
+  errorBannerMessage: $("#error-banner-message"),
+  errorBannerDismiss: $("#error-banner-dismiss"),
+  errorBannerToggle: $("#error-banner-toggle"),
+  errorBannerLog: $("#error-banner-log"),
+  routingStatusRow: $("#routing-status-row"),
+  routingStatusText: $("#routing-status-text"),
   runtimeDiagnostics: $("#runtime-diagnostics"),
   setupPanel: $("#setup-panel"),
   advancedSetupBody: $("#advanced-setup-body"),
@@ -103,6 +109,7 @@ const els = {
   selectedTaskMeta: $("#selected-task-meta"),
   auditCount: $("#audit-count"),
   auditTrail: $("#audit-trail"),
+  runLedgerContainer: $("#run-ledger-container"),
   taskFilter: $("#task-filter"),
   taskStatusFilter: $("#task-status-filter")
 };
@@ -262,10 +269,140 @@ function setAdvancedSetupVisibility(visible) {
   }
 }
 
+// ── Persistent error surface ──────────────────────────────────────────────
+// showError no longer auto-hides; the user dismisses manually, and every
+// error is appended to an in-memory log that can be reviewed from the banner.
+const MAX_ERROR_LOG_ENTRIES = 50;
+const MAX_ERROR_MESSAGE_CHARS = 300;
+const errorLog = [];
+
+function truncateErrorMessage(msg) {
+  const text = String(msg ?? "").trim();
+  if (text.length <= MAX_ERROR_MESSAGE_CHARS) return text;
+  return `${text.slice(0, MAX_ERROR_MESSAGE_CHARS)}…`;
+}
+
+function normalizeErrorMessage(err) {
+  if (err == null) return "Unknown error";
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message || err.name || "Error";
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function renderErrorLog() {
+  if (!els.errorBannerLog) return;
+  const entries = errorLog.slice(-MAX_ERROR_LOG_ENTRIES);
+  if (!entries.length) {
+    els.errorBannerLog.innerHTML = "";
+    return;
+  }
+  els.errorBannerLog.innerHTML = entries
+    .map((entry) => {
+      const cls = entry.level === "warn" ? "error-banner-log-warn" : "";
+      const ts = new Date(entry.at).toLocaleTimeString();
+      const context = entry.context ? `${escapeHtml(entry.context)}: ` : "";
+      return `<li class="${cls}"><span>${escapeHtml(ts)}</span> ${context}${escapeHtml(entry.message)}</li>`;
+    })
+    .join("");
+}
+
 function showError(msg) {
-  els.errorBanner.textContent = msg;
+  if (!els.errorBanner) return;
+  const text = truncateErrorMessage(msg);
+  if (els.errorBannerMessage) {
+    els.errorBannerMessage.textContent = text;
+  } else {
+    els.errorBanner.textContent = text;
+  }
   els.errorBanner.classList.remove("hidden");
-  setTimeout(() => els.errorBanner.classList.add("hidden"), 8000);
+}
+
+function pushErrorEntry(level, context, message) {
+  const entry = {
+    level,
+    context: context ?? "",
+    message: truncateErrorMessage(message),
+    at: Date.now()
+  };
+  errorLog.push(entry);
+  if (errorLog.length > MAX_ERROR_LOG_ENTRIES * 2) {
+    errorLog.splice(0, errorLog.length - MAX_ERROR_LOG_ENTRIES);
+  }
+  renderErrorLog();
+  return entry;
+}
+
+function logError(context, err) {
+  const message = normalizeErrorMessage(err);
+  const label = context ? `[${context}]` : "";
+  console.error(`${label} ${message}`.trim(), err);
+  const entry = pushErrorEntry("error", context, message);
+  showError(entry.context ? `${entry.context}: ${entry.message}` : entry.message);
+}
+
+function logWarn(context, err) {
+  const message = normalizeErrorMessage(err);
+  const label = context ? `[${context}]` : "";
+  console.warn(`${label} ${message}`.trim(), err);
+  pushErrorEntry("warn", context, message);
+}
+
+// ── Routing status row ────────────────────────────────────────────────────
+// One-line status strip that shows live provider/model/tool state during a
+// streaming turn. Clears to "Idle" on completion or error.
+let routingStatusTimer = null;
+let routingActiveToolCount = 0;
+
+function setRoutingStatus(text, { active = true, ttlMs = 0 } = {}) {
+  if (!els.routingStatusRow || !els.routingStatusText) return;
+  if (routingStatusTimer) {
+    clearTimeout(routingStatusTimer);
+    routingStatusTimer = null;
+  }
+  els.routingStatusText.textContent = text;
+  els.routingStatusRow.classList.toggle("active", active);
+  if (ttlMs > 0) {
+    routingStatusTimer = setTimeout(() => {
+      resetRoutingStatus();
+    }, ttlMs);
+  }
+}
+
+function resetRoutingStatus() {
+  if (!els.routingStatusRow || !els.routingStatusText) return;
+  if (routingStatusTimer) {
+    clearTimeout(routingStatusTimer);
+    routingStatusTimer = null;
+  }
+  routingActiveToolCount = 0;
+  els.routingStatusText.textContent = "Idle";
+  els.routingStatusRow.classList.remove("active");
+}
+
+function routingStatusFromChunk(chunk) {
+  if (!chunk) return;
+  if (chunk.type === "status") {
+    const text = String(chunk.text ?? "").trim();
+    if (text) setRoutingStatus(text);
+    return;
+  }
+  if (chunk.type === "tool_call") {
+    routingActiveToolCount += 1;
+    setRoutingStatus(
+      `${chunk.server ?? "?"}.${chunk.tool ?? "?"} running (${routingActiveToolCount} in flight)`
+    );
+    return;
+  }
+  if (chunk.type === "tool_result") {
+    routingActiveToolCount = Math.max(0, routingActiveToolCount - 1);
+    const verdict = chunk.status === "error" ? "failed" : "completed";
+    setRoutingStatus(`${chunk.tool ?? "tool"} ${verdict}`);
+    return;
+  }
 }
 
 function escapeHtml(value = "") {
@@ -621,7 +758,30 @@ function formatMessageTimestamp(isoString) {
 }
 
 function clearError() {
+  if (!els.errorBanner) return;
   els.errorBanner.classList.add("hidden");
+  if (els.errorBannerLog) {
+    els.errorBannerLog.classList.add("hidden");
+  }
+  if (els.errorBannerToggle) {
+    els.errorBannerToggle.setAttribute("aria-expanded", "false");
+  }
+}
+
+function toggleErrorLog() {
+  if (!els.errorBannerLog || !els.errorBannerToggle) return;
+  const expanded = els.errorBannerToggle.getAttribute("aria-expanded") === "true";
+  const next = !expanded;
+  els.errorBannerToggle.setAttribute("aria-expanded", next ? "true" : "false");
+  els.errorBannerLog.classList.toggle("hidden", !next);
+  if (next) renderErrorLog();
+}
+
+if (els.errorBannerDismiss) {
+  els.errorBannerDismiss.addEventListener("click", clearError);
+}
+if (els.errorBannerToggle) {
+  els.errorBannerToggle.addEventListener("click", toggleErrorLog);
 }
 
 function setConnected(count) {
@@ -658,13 +818,24 @@ function renderKeyFields() {
     const lbl = document.createElement("label");
     lbl.textContent = label;
     const dot = document.createElement("span");
-    dot.className = state?.keyStatus?.[id] ? "dot dot-on dot-sm" : "dot dot-off dot-sm";
+    const hasKey = state?.keyStatus?.[id];
+    const hasModels = allModels?.[id]?.models?.length > 0;
+    const hasError = allModels?.[id]?.error;
+    dot.className = hasKey && hasModels ? "dot dot-on dot-sm"
+      : hasKey && hasError ? "dot dot-err dot-sm"
+      : hasKey ? "dot dot-warn dot-sm"
+      : "dot dot-off dot-sm";
+    dot.title = hasKey && hasModels ? `${allModels[id].models.length} models available`
+      : hasKey && hasError ? `Error: ${allModels[id].error}`
+      : hasKey ? "Key saved — click Refresh Models to connect"
+      : "No API key";
     lbl.prepend(dot);
 
+    const modelCount = hasModels ? ` (${allModels[id].models.length} models)` : "";
     const input = document.createElement("input");
     input.type = "password";
     input.dataset.provider = id;
-    input.placeholder = state?.keyStatus?.[id] ? "key saved (leave blank to keep)" : "paste API key";
+    input.placeholder = hasKey ? `key saved${modelCount} (leave blank to keep)` : "paste API key";
     input.className = "key-input";
 
     row.append(lbl, input);
@@ -1007,6 +1178,9 @@ function renderMcpServers() {
 
     const card = document.createElement("div");
     card.className = "server-card";
+    if (status.status === "error") {
+      card.classList.add("server-card--error");
+    }
     const rootSummary = (server.roots ?? [server.rootPath]).filter(Boolean).join(", ");
 
     const meta = server.kind === "builtin-filesystem"
@@ -1036,12 +1210,30 @@ function renderMcpServers() {
       server.kind === "builtin-memory" ||
       server.kind === "builtin-mail-calendar" ||
       server.kind === "builtin-browser-ops";
+    const isCatalog = (server.kind ?? "").startsWith("catalog-") || server.kind === "builtin-qdrant-rag" || server.kind === "builtin-shell-exec" || server.kind === "builtin-git-ops";
+    const envEntries = Object.entries(server.env ?? {});
+    const hasEnv = isCatalog && envEntries.length > 0;
+    const hasAuthToken = isCatalog && server.transport === "streamable-http";
+    const envHtml = (hasEnv || hasAuthToken)
+      ? `<div class="server-card-env">${hasAuthToken
+          ? `<div class="env-row"><label class="env-label">Auth Token</label><input class="text-input auth-token-input" type="password" data-server="${escapeHtml(server.name)}" value="${escapeHtml(server.authToken ?? "")}" placeholder="Bearer token or PAT" /></div>`
+          : ""}${envEntries.map(([key, val]) =>
+          `<div class="env-row"><label class="env-label">${escapeHtml(key)}</label><input class="text-input env-input" type="text" data-server="${escapeHtml(server.name)}" data-env-key="${escapeHtml(key)}" value="${escapeHtml(val)}" placeholder="Enter ${escapeHtml(key)}" /></div>`
+        ).join("")}</div>`
+      : "";
+    const toggleHtml = isCatalog
+      ? `<label class="toggle-label"><input type="checkbox" class="server-enable-toggle" data-server="${escapeHtml(server.name)}" ${server.enabled !== false ? "checked" : ""} /> Enabled</label>`
+      : "";
     card.innerHTML = `
       <div class="server-card-header">
         <strong>${escapeHtml(server.name)}</strong>
-        ${isBuiltin ? "" : `<button class="btn secondary btn-remove-server" data-name="${escapeHtml(server.name)}">Remove</button>`}
+        <div class="server-card-actions">
+          ${toggleHtml}
+          ${isBuiltin ? "" : `<button class="btn secondary btn-remove-server" data-name="${escapeHtml(server.name)}">Remove</button>`}
+        </div>
       </div>
       <div class="server-card-meta">${escapeHtml(meta)}</div>
+      ${envHtml}
       <div class="server-status-row">
         <span class="status-pill ${statusClass}">${escapeHtml(String(status.status ?? "not_connected").replace(/_/g, " "))}</span>
         <span>${(status.tools ?? []).length} tool(s)</span>
@@ -1205,6 +1397,46 @@ function buildTaskRenderResult(task) {
   };
 }
 
+function renderRunLedger(task) {
+  const container = els.runLedgerContainer;
+  if (!container) return;
+
+  // Clear existing contents
+  container.innerHTML = "";
+
+  const ledger = task?.runLedger;
+  if (!ledger) {
+    container.className = "run-ledger-container empty-state";
+    container.textContent = task
+      ? "No iterative run ledger for this task."
+      : "Select a task to inspect its run ledger.";
+    return;
+  }
+
+  container.className = "run-ledger-container";
+
+  const outcome = ledger.outcome ?? "unknown";
+  const phaseCount = ledger.budget?.phasesUsed ?? (ledger.phases?.length ?? 0);
+  const wallSecs = ledger.budget?.wallClockMs
+    ? Math.round(ledger.budget.wallClockMs / 100) / 10
+    : 0;
+
+  const ledgerSection = document.createElement("details");
+  ledgerSection.className = "run-ledger-section";
+  ledgerSection.open = false;
+
+  const summary = document.createElement("summary");
+  summary.innerHTML = `<strong>Run Ledger</strong> <span class="hint">(${escapeHtml(outcome)} &mdash; ${phaseCount} phase${phaseCount === 1 ? "" : "s"}, ${wallSecs}s)</span>`;
+  ledgerSection.appendChild(summary);
+
+  const pre = document.createElement("pre");
+  pre.className = "run-ledger-json";
+  pre.textContent = JSON.stringify(ledger, null, 2);
+  ledgerSection.appendChild(pre);
+
+  container.appendChild(ledgerSection);
+}
+
 function renderSelectedTaskDetails() {
   if (els.selectedTaskMeta) {
     els.selectedTaskMeta.textContent = selectedTask
@@ -1217,6 +1449,7 @@ function renderSelectedTaskDetails() {
     renderTimeline(null);
     renderToolActivity(null);
     renderAuditTrail();
+    renderRunLedger(null);
     return;
   }
 
@@ -1224,6 +1457,7 @@ function renderSelectedTaskDetails() {
   renderTimeline(selectedTask.timeline ?? []);
   renderToolActivity(selectedTask);
   renderAuditTrail();
+  renderRunLedger(selectedTask);
 }
 
 async function refreshSelectedTask() {
@@ -1237,7 +1471,8 @@ async function refreshSelectedTask() {
   try {
     selectedTask = await api.getTask(selectedTaskId);
     selectedTaskAudit = await api.getAuditTrail({ taskId: selectedTaskId, limit: 80 });
-  } catch {
+  } catch (err) {
+    logWarn("refreshSelectedTask", err);
     selectedTask = null;
     selectedTaskAudit = [];
   }
@@ -1349,7 +1584,8 @@ async function refreshTaskList(preferredTaskId = null) {
       return;
     }
     await refreshSelectedTask();
-  } catch {
+  } catch (err) {
+    logError("refreshTaskList", err);
     recentTasks = [];
     selectedTask = null;
     selectedTaskAudit = [];
@@ -1568,14 +1804,24 @@ async function refreshActiveConversation() {
   try {
     activeConversation = await api.getConversation(state.activeConversationId);
     const taskIds = [...new Set((activeConversation?.messages ?? []).map((message) => message.taskId).filter(Boolean))];
-    const tasks = await Promise.all(taskIds.map((taskId) => api.getTask(taskId).catch(() => null)));
+    const taskResults = await Promise.all(
+      taskIds.map(async (taskId) => {
+        try {
+          return await api.getTask(taskId);
+        } catch (err) {
+          logWarn("refreshActiveConversation:getTask", `${taskId}: ${normalizeErrorMessage(err)}`);
+          return null;
+        }
+      })
+    );
     activeConversationTasks = new Map(
-      tasks
+      taskResults
         .filter(Boolean)
         .map((task) => [task.id, task])
     );
     renderActiveConversation();
-  } catch {
+  } catch (err) {
+    logError("refreshActiveConversation", err);
     activeConversation = null;
     activeConversationTasks = new Map();
     renderActiveConversation();
@@ -1873,7 +2119,8 @@ async function getNormalizedBootstrapState() {
   if ((keyStatusMissing || keyStatusAllFalse) && api.getKeyStatus) {
     try {
       keyStatus = await api.getKeyStatus();
-    } catch {
+    } catch (err) {
+      logWarn("getNormalizedBootstrapState:getKeyStatus", err);
       keyStatus = keyStatusMissing ? Object.fromEntries(Object.keys(providers).map((id) => [id, false])) : keyStatus;
     }
   }
@@ -1885,14 +2132,21 @@ async function getNormalizedBootstrapState() {
   };
 }
 
-async function refreshState() {
+// Guards against racing refreshState() calls. If a refresh is already running,
+// subsequent callers await the in-flight promise; if multiple requests arrive
+// while one is running, we queue a single follow-up refresh so the caller is
+// guaranteed to observe a refresh that started after their request.
+let inFlightRefresh = null;
+let pendingRefresh = false;
+
+async function doRefreshState() {
   let bootstrapState = null;
   try {
     bootstrapState = await getNormalizedBootstrapState();
     state = mergeAssistantState(bootstrapState, {});
     syncBootstrapControls();
   } catch (err) {
-    showError("Failed to load core controls: " + err.message);
+    logError("refreshState:bootstrap", err);
     return;
   }
 
@@ -1910,8 +2164,32 @@ async function refreshState() {
     await refreshActiveConversation();
     await refreshMailCalendarStatus();
   } catch (err) {
-    showError("Core controls loaded, but workspace state failed: " + err.message);
+    logError("refreshState:workspace", err);
   }
+}
+
+async function refreshState() {
+  if (inFlightRefresh) {
+    pendingRefresh = true;
+    await inFlightRefresh;
+    if (!pendingRefresh) return;
+    pendingRefresh = false;
+  }
+  inFlightRefresh = (async () => {
+    try {
+      await doRefreshState();
+      // If additional refresh requests arrived while we were running, run
+      // one more time so the latest caller sees state that was fetched after
+      // their call — but collapse the storm to a single follow-up pass.
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        await doRefreshState();
+      }
+    } finally {
+      inFlightRefresh = null;
+    }
+  })();
+  return inFlightRefresh;
 }
 
 function bindThemeSelect(el) {
@@ -2055,8 +2333,10 @@ els.btnRefreshModels.addEventListener("click", async () => {
     allModels = await api.listAllModels();
     const successes = Object.entries(allModels).filter(([, data]) => data.models?.length > 0);
     const failures = Object.entries(allModels).filter(([, data]) => data.error && !data.models?.length);
-    els.modelFetchStatus.textContent = `Fetched models from ${successes.length} provider(s).` +
-      (failures.length ? ` Errors: ${failures.map(([id, data]) => `${id}: ${data.error}`).join(", ")}` : "");
+    const successNames = successes.map(([id]) => id).join(", ");
+    const failureDetails = failures.map(([id, data]) => `${id}: ${data.error}`).join(" | ");
+    els.modelFetchStatus.textContent = `${successes.length} provider(s) OK (${successNames}).` +
+      (failures.length ? ` ${failures.length} failed: ${failureDetails}` : "");
     renderModelOverride();
     renderProfiles();
   } catch (err) {
@@ -2202,6 +2482,41 @@ els.mcpServerList.addEventListener("click", (event) => {
   els.mcpConnectStatus.textContent = "Server removed locally. Save Tool Config to persist the change.";
 });
 
+els.mcpServerList.addEventListener("change", (event) => {
+  const toggle = event.target.closest(".server-enable-toggle");
+  if (toggle) {
+    const serverName = toggle.dataset.server;
+    const server = (state.mcpServers ?? []).find((s) => s.name === serverName);
+    if (server) {
+      server.enabled = toggle.checked;
+      els.mcpConnectStatus.textContent = `${serverName} ${toggle.checked ? "enabled" : "disabled"}. Save Tool Config to persist.`;
+    }
+    return;
+  }
+
+  const authInput = event.target.closest(".auth-token-input");
+  if (authInput) {
+    const serverName = authInput.dataset.server;
+    const server = (state.mcpServers ?? []).find((s) => s.name === serverName);
+    if (server) {
+      server.authToken = authInput.value.trim();
+      els.mcpConnectStatus.textContent = `Auth token updated for ${serverName}. Save Tool Config to persist.`;
+    }
+    return;
+  }
+
+  const envInput = event.target.closest(".env-input");
+  if (envInput) {
+    const serverName = envInput.dataset.server;
+    const envKey = envInput.dataset.envKey;
+    const server = (state.mcpServers ?? []).find((s) => s.name === serverName);
+    if (server && server.env) {
+      server.env[envKey] = envInput.value.trim();
+      els.mcpConnectStatus.textContent = `${envKey} updated for ${serverName}. Save Tool Config to persist.`;
+    }
+  }
+});
+
 function serializeMcpServersFromUi() {
   const nextServers = getCustomServers().map((server) => ({ ...server }));
   if (els.desktopCommanderMcpEnabled?.checked) {
@@ -2309,6 +2624,14 @@ if (api.onTaskUpdated) {
   api.onTaskUpdated(() => refreshTaskList());
 }
 
+const btnClearTasks = document.getElementById("btn-clear-tasks");
+if (btnClearTasks && api.clearTasks) {
+  btnClearTasks.addEventListener("click", async () => {
+    const result = await api.clearTasks();
+    await refreshTaskList();
+  });
+}
+
 if (api.onConversationUpdated) {
   api.onConversationUpdated(async ({ conversationId }) => {
     if (!conversationId) return;
@@ -2328,6 +2651,24 @@ if (api.onMemoryUpdated) {
     const freshState = await getWorkspaceSnapshot();
     state.memory = freshState.memory;
     renderMemory();
+  });
+}
+
+if (api.onN8nTrigger) {
+  api.onN8nTrigger((data) => {
+    const title = data?.title ?? "n8n Workflow";
+    const action = data?.action ?? "notify";
+    const payload = data?.payload;
+
+    // Record the n8n trigger in the persistent log surface. We no longer
+    // reuse the error banner as a flash toast — it's reserved for errors.
+    const msg = payload?.message ?? payload?.summary ?? title;
+    logWarn("n8n", `${title}: ${msg}`);
+
+    // If it includes a task prompt, inject it
+    if (action === "run_task" && payload?.prompt && els.taskPrompt) {
+      els.taskPrompt.value = payload.prompt;
+    }
   });
 }
 
@@ -2473,7 +2814,8 @@ async function refreshMailCalendarStatus() {
 
     els.mailCalendarStatus.textContent =
       "Mail & Calendar is saved. Click Connect Tools below to start the MCP server.";
-  } catch {
+  } catch (err) {
+    logWarn("mailCalendarStatus", err);
     els.mailCalendarStatus.textContent = "";
   }
 }
@@ -2589,7 +2931,9 @@ if (els.sandboxPreference) {
     try {
       await api.setSandboxPreference(els.sandboxPreference.value);
       state.sandboxPreference = els.sandboxPreference.value;
-    } catch {}
+    } catch (err) {
+      logError("setSandboxPreference", err);
+    }
   });
 }
 
@@ -2644,6 +2988,7 @@ function attachAssistantStreamHandlers() {
   if (unsubError) unsubError();
 
   unsubChunk = api.onStreamChunk((chunk) => {
+    routingStatusFromChunk(chunk);
     if (chunk.type === "text") {
       streamingAssistantText += chunk.text;
       if (streamingAssistantText.trim()) {
@@ -2673,6 +3018,7 @@ function attachAssistantStreamHandlers() {
   unsubDone = api.onStreamDone(async (result) => {
     els.btnRun.disabled = false;
     if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
+    resetRoutingStatus();
     if (result.pendingApproval && result.taskId) {
       showPlanApprovalBanner(result.taskId, result.workflowPreview ?? result.executionPlan);
     }
@@ -2690,9 +3036,10 @@ function attachAssistantStreamHandlers() {
   });
 
   unsubError = api.onStreamError((err) => {
-    showError(err.error);
+    logError("assistant-stream", err?.error ?? err);
     els.btnRun.disabled = false;
     if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
+    resetRoutingStatus();
     resetStreamingState();
     refreshActiveConversation();
     refreshTaskList();
@@ -2714,6 +3061,7 @@ els.btnRun.addEventListener("click", async () => {
   renderActiveConversation();
   clearError();
   hidePlanApprovalBanner();
+  setRoutingStatus("Planning — selecting model...");
 
   attachAssistantStreamHandlers();
 
@@ -2727,16 +3075,18 @@ els.btnRun.addEventListener("click", async () => {
       executionMode: els.executionMode?.value ?? "plan_first"
     });
     if (result?.error) {
-      showError(result.error);
+      logError("runTask", result.error);
       els.btnRun.disabled = false;
       if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
+      resetRoutingStatus();
       resetStreamingState();
       await refreshActiveConversation();
     }
   } catch (err) {
-    showError(err.message);
+    logError("runTask", err);
     els.btnRun.disabled = false;
     if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
+    resetRoutingStatus();
     resetStreamingState();
     await refreshActiveConversation();
   }
@@ -2757,6 +3107,7 @@ if (els.btnApprovePlan) {
     streamingStatusText = "Executing approved plan...";
     renderActiveConversation();
     clearError();
+    setRoutingStatus("Executing approved plan...");
 
     attachAssistantStreamHandlers();
 
@@ -2767,16 +3118,18 @@ if (els.btnApprovePlan) {
         modelOverride: els.modelOverride.value || undefined
       });
       if (result?.error) {
-        showError(result.error);
+        logError("approvePlan", result.error);
         els.btnRun.disabled = false;
         els.btnApprovePlan.disabled = false;
+        resetRoutingStatus();
         resetStreamingState();
         await refreshActiveConversation();
       }
     } catch (err) {
-      showError(err.message);
+      logError("approvePlan", err);
       els.btnRun.disabled = false;
       els.btnApprovePlan.disabled = false;
+      resetRoutingStatus();
       resetStreamingState();
       await refreshActiveConversation();
     }
