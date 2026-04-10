@@ -11,6 +11,7 @@ Return strict JSON:
   "what_worked": ["bullet", ...],
   "what_failed": ["bullet", ...],
   "generalization": "one sentence an operator could read and believe",
+  "artifacts_produced": ["/absolute/path", ...],
   "confidence": 0.0-1.0
 }
 No prose outside JSON.`;
@@ -21,11 +22,16 @@ export function buildLessonPrompt({
   outcome,
   toolsUsed,
   criticVerdicts,
-  planSummary
+  planSummary,
+  artifacts
 }) {
   const verdictSummary = (criticVerdicts ?? [])
     .map((v, i) => `Phase ${i + 1}: ${v.decision} (${v.reasoning})`)
     .join("\n");
+
+  const artifactSummary = Array.isArray(artifacts) && artifacts.length > 0
+    ? artifacts.map((a) => `- ${a.path} (${a.kind})`).join("\n")
+    : "";
 
   return [
     `TASK TYPE: ${taskType}`,
@@ -33,7 +39,8 @@ export function buildLessonPrompt({
     `OUTCOME: ${outcome}`,
     `TOOLS USED: ${(toolsUsed ?? []).join(", ") || "none"}`,
     planSummary ? `PLAN:\n${planSummary}` : "",
-    verdictSummary ? `CRITIC VERDICTS:\n${verdictSummary}` : ""
+    verdictSummary ? `CRITIC VERDICTS:\n${verdictSummary}` : "",
+    artifactSummary ? `ARTIFACTS:\n${artifactSummary}` : ""
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -55,6 +62,7 @@ export function parseLesson(raw) {
       what_worked: Array.isArray(parsed.what_worked) ? parsed.what_worked.map(String) : [],
       what_failed: Array.isArray(parsed.what_failed) ? parsed.what_failed.map(String) : [],
       generalization: String(parsed.generalization ?? ""),
+      artifacts_produced: Array.isArray(parsed.artifacts_produced) ? parsed.artifacts_produced.map(String) : [],
       confidence: typeof parsed.confidence === "number" ? Math.min(1, Math.max(0, parsed.confidence)) : 0.5
     };
   } catch {
@@ -71,6 +79,9 @@ export async function writeLesson({ memoryStore, lesson }) {
     const failedLine = Array.isArray(lesson.what_failed) && lesson.what_failed.length
       ? `Failed: ${lesson.what_failed.join("; ")}`
       : "";
+    const artifactsLine = Array.isArray(lesson.artifacts_produced) && lesson.artifacts_produced.length
+      ? `Artifacts: ${lesson.artifacts_produced.join(", ")}`
+      : "";
 
     const entry = memoryStore.upsert({
       category: "run_lesson",
@@ -79,6 +90,7 @@ export async function writeLesson({ memoryStore, lesson }) {
         `Outcome: ${lesson.outcome ?? "unknown"}`,
         workedLine,
         failedLine,
+        artifactsLine,
         lesson.generalization ? `Generalization: ${lesson.generalization}` : ""
       ]
         .filter(Boolean)
@@ -111,7 +123,8 @@ export async function generateAndWriteLesson({
   outcome,
   toolsUsed,
   criticVerdicts,
-  planSummary
+  planSummary,
+  artifacts
 }) {
   try {
     const userMessage = buildLessonPrompt({
@@ -120,7 +133,8 @@ export async function generateAndWriteLesson({
       outcome,
       toolsUsed,
       criticVerdicts,
-      planSummary
+      planSummary,
+      artifacts
     });
 
     const result = await invokeModel({

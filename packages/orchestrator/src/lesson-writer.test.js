@@ -124,3 +124,55 @@ test("parseLesson returns null when taskType is missing", () => {
   }));
   assert.equal(lesson, null);
 });
+
+test("buildLessonPrompt includes ARTIFACTS section when provided", () => {
+  const prompt = buildLessonPrompt({
+    taskType: "disputes",
+    originalGoal: "Summarize exhibits",
+    outcome: "success",
+    toolsUsed: ["create_workbook"],
+    criticVerdicts: [],
+    artifacts: [
+      { path: "/tmp/matter.xlsx", kind: "xlsx", sizeBytes: 12345 }
+    ]
+  });
+  assert.ok(prompt.includes("ARTIFACTS"));
+  assert.ok(prompt.includes("matter.xlsx"));
+});
+
+test("parseLesson accepts artifacts_produced array", () => {
+  const lesson = parseLesson(JSON.stringify({
+    taskType: "disputes",
+    prompt_gist: "summarize",
+    tools_used: ["create_workbook"],
+    outcome: "success",
+    what_worked: [],
+    what_failed: [],
+    generalization: "ok",
+    confidence: 0.8,
+    artifacts_produced: ["/tmp/matter.xlsx"]
+  }));
+  assert.ok(Array.isArray(lesson.artifacts_produced));
+  assert.equal(lesson.artifacts_produced[0], "/tmp/matter.xlsx");
+});
+
+test("writeLesson stores artifacts in memory content", async () => {
+  let written = null;
+  await writeLesson({
+    memoryStore: {
+      upsert(entry) { written = entry; return { ...entry, id: "mem_test" }; }
+    },
+    lesson: {
+      taskType: "disputes",
+      prompt_gist: "summarize",
+      tools_used: ["create_workbook"],
+      outcome: "success",
+      what_worked: [],
+      what_failed: [],
+      generalization: "ok",
+      artifacts_produced: ["/tmp/matter.xlsx", "/tmp/matter.docx"]
+    }
+  });
+  assert.ok(written);
+  assert.ok(written.content.includes("Artifacts: /tmp/matter.xlsx, /tmp/matter.docx"));
+});
