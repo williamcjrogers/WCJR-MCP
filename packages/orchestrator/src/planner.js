@@ -1,6 +1,7 @@
 // packages/orchestrator/src/planner.js
 import { runCritic } from "./critic.js";
 import { extractArtifactsFromPhase as defaultExtractArtifacts, mergeArtifactHistory } from "./artifact-extractor.js";
+import { buildExecutionBatches } from "./workflow.js";
 
 function summarizePlan(phases, currentIndex) {
   return phases
@@ -275,7 +276,6 @@ export async function runIterativePlan({
     budget: { phasesUsed: 0, wallClockMs: 0, tokensUsed: 0 }
   };
   let lastContent = "";
-  let phaseIndex = 0;
   let totalPhasesExecuted = 0;
 
   const maxPhases = budget?.maxTotalPhases ?? 12;
@@ -284,7 +284,44 @@ export async function runIterativePlan({
 
   const criticSelection = getCriticModel();
 
-  while (phaseIndex < phases.length) {
+  // ── L2: compute initial execution batches from the plan's DAG ──
+  // Plans that don't declare any parallelism metadata (no explicit parallelGroup,
+  // no dependsOn) reproduce L0 sequential semantics: one phase per batch. Plans
+  // with explicit metadata go through buildExecutionBatches.
+  const computeBatches = (phaseList) => {
+    const declaresParallelism = phaseList.some(
+      (p) =>
+        (typeof p.parallelGroup === "number" && Number.isFinite(p.parallelGroup)) ||
+        (Array.isArray(p.dependsOn) && p.dependsOn.length > 0)
+    );
+    return declaresParallelism
+      ? buildExecutionBatches(phaseList)
+      : phaseList.map((p) => [p]);
+  };
+
+  let batches;
+  try {
+    batches = computeBatches(phases);
+  } catch (err) {
+    console.error("[planner] invalid execution plan:", err?.message ?? err);
+    ledger.outcome = "failed";
+    ledger.error = `Invalid plan: ${err?.message ?? err}`;
+    ledger.endedAt = Date.now();
+    ledger.budget.wallClockMs = Date.now() - startedAt;
+    ledger.artifacts = [];
+    ledger.batches = [];
+    return {
+      outcome: "failed",
+      content: "",
+      pendingApproval: false,
+      error: ledger.error,
+      ledger
+    };
+  }
+  ledger.batches = [];
+
+  let batchIndex = 0;
+  while (batchIndex < batches.length) {
     // Budget check: phases
     if (totalPhasesExecuted >= maxPhases) {
       emitStatus?.(`Budget exhausted (${maxPhases} phases) — returning best-effort`);
@@ -298,40 +335,57 @@ export async function runIterativePlan({
       break;
     }
 
-    const phase = phases[phaseIndex];
-    totalPhasesExecuted += 1;
+    const batch = batches[batchIndex];
+    const batchStartedAt = Date.now();
+    const batchRecord = {
+      index: batchIndex,
+      phaseIds: batch.map((p) => p.id),
+      startedAt: batchStartedAt,
+      endedAt: null
+    };
 
-    const result = await runPhase(phase, {
-      phases,
-      phaseIndex,
-      originalGoal,
-      taskType,
-      executorModel,
-      workspaceDir,
-      extractArtifactsFn,
-      invokeModel,
-      resolveProvider,
-      criticSelection,
-      emitStatus,
-      maxCriticRounds,
-      systemMessage,
-      conversationMessages,
-      runId: plan.taskId ?? "adhoc",
-      batchIndex: 0,
-      batchSize: 1,
-      totalPhases: phases.length,
-      signal: undefined
-    });
-
-    ledger.phases.push(result.phaseEntry);
-    if (result.phaseEntry.content) {
-      lastContent = result.phaseEntry.content;
+    // ── Execute all phases in this batch sequentially (Task 3 upgrades to Promise.all) ──
+    const batchResults = [];
+    for (const phase of batch) {
+      totalPhasesExecuted += 1;
+      const result = await runPhase(phase, {
+        phases,
+        phaseIndex: phases.indexOf(phase),
+        originalGoal,
+        taskType,
+        executorModel,
+        workspaceDir,
+        extractArtifactsFn,
+        invokeModel,
+        resolveProvider,
+        criticSelection,
+        emitStatus,
+        maxCriticRounds,
+        systemMessage,
+        conversationMessages,
+        runId: plan.taskId ?? "adhoc",
+        batchIndex,
+        batchSize: batch.length,
+        totalPhases: phases.length,
+        signal: undefined
+      });
+      ledger.phases.push(result.phaseEntry);
+      batchResults.push(result);
+      if (result.phaseEntry.content) {
+        lastContent = result.phaseEntry.content;
+      }
     }
 
-    // Execution error → terminate failed
-    if (result.phaseEntry.status === "error") {
-      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
-      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
+    batchRecord.endedAt = Date.now();
+    ledger.batches.push(batchRecord);
+
+    // ── Reconciliation ──
+
+    // 1. Any error → terminate as failed
+    const erroredResult = batchResults.find((r) => r.phaseEntry.status === "error");
+    if (erroredResult) {
+      const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(allArtifacts);
       ledger.outcome = "failed";
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
@@ -340,17 +394,18 @@ export async function runIterativePlan({
         outcome: "failed",
         content: lastContent,
         pendingApproval: false,
-        error: result.phaseEntry.error,
+        error: erroredResult.phaseEntry.error,
         ledger
       };
     }
 
-    // Retry exhausted → force escalate
-    if (result.phaseEntry.status === "retry_exhausted") {
-      emitStatus?.(`Escalating: ${result.error}`);
-      result.phaseEntry.status = "escalated";
-      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
-      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
+    // 2. Any retry exhausted → force escalate
+    const retryExhausted = batchResults.find((r) => r.phaseEntry.status === "retry_exhausted");
+    if (retryExhausted) {
+      retryExhausted.phaseEntry.status = "escalated";
+      emitStatus?.(`Escalating: ${retryExhausted.error}`);
+      const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(allArtifacts);
       ledger.outcome = "escalated";
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
@@ -359,16 +414,17 @@ export async function runIterativePlan({
         outcome: "escalated",
         content: lastContent,
         pendingApproval: true,
-        escalationReason: result.error,
+        escalationReason: retryExhausted.error,
         ledger
       };
     }
 
-    // Critic verdict: escalate → terminate
-    if (result.verdict?.decision === "escalate") {
-      emitStatus?.(`Escalating: ${result.verdict.escalationReason ?? result.verdict.reasoning}`);
-      const earlyAllArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
-      ledger.artifacts = mergeArtifactHistory(earlyAllArtifacts);
+    // 3. Any escalate verdict → terminate
+    const escalatedResult = batchResults.find((r) => r.verdict?.decision === "escalate");
+    if (escalatedResult) {
+      emitStatus?.(`Escalating: ${escalatedResult.verdict.escalationReason ?? escalatedResult.verdict.reasoning}`);
+      const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
+      ledger.artifacts = mergeArtifactHistory(allArtifacts);
       ledger.outcome = "escalated";
       ledger.endedAt = Date.now();
       ledger.budget.wallClockMs = Date.now() - startedAt;
@@ -377,26 +433,44 @@ export async function runIterativePlan({
         outcome: "escalated",
         content: lastContent,
         pendingApproval: true,
-        escalationReason: result.verdict.escalationReason ?? result.verdict.reasoning,
+        escalationReason: escalatedResult.verdict.escalationReason ?? escalatedResult.verdict.reasoning,
         ledger
       };
     }
 
-    // Critic verdict: amend_plan → apply amendments, continue
-    if (result.verdict?.decision === "amend_plan") {
-      let amended;
-      try {
-        amended = applyAmendments(phases, phaseIndex, result.verdict.amendments);
-      } catch (err) {
-        console.error("[planner] amendment application failed, treating as accept:", err);
-        amended = phases;
+    // 4. Any amend_plan → apply amendments and re-batch remaining work
+    const amendingResults = batchResults.filter((r) => r.verdict?.decision === "amend_plan");
+    if (amendingResults.length > 0) {
+      for (const amendResult of amendingResults) {
+        try {
+          const anchorIndex = phases.indexOf(
+            batch.find((p) => p.id === amendResult.phaseEntry.id) ?? batch[0]
+          );
+          phases = applyAmendments(phases, anchorIndex, amendResult.verdict.amendments);
+        } catch (err) {
+          console.error("[planner] amendment application failed:", err);
+        }
       }
-      const addedCount = amended.length - phases.length;
-      phases = amended;
-      emitStatus?.(`Amending plan (${addedCount > 0 ? `+${addedCount}` : addedCount} phases)...`);
+      try {
+        const newBatches = computeBatches(phases);
+        // Completed phases are those already in ledger.phases
+        const completedPhaseIds = new Set(ledger.phases.map((p) => p.id));
+        const remainingBatches = [];
+        for (const b of newBatches) {
+          const uncompleted = b.filter((p) => !completedPhaseIds.has(p.id));
+          if (uncompleted.length > 0) {
+            remainingBatches.push(uncompleted);
+          }
+        }
+        // Replace the forward schedule: keep completed batches, swap in remaining
+        batches = [...batches.slice(0, batchIndex + 1), ...remainingBatches];
+        emitStatus?.(`Amending plan — ${remainingBatches.length} forward batch(es) after amendments...`);
+      } catch (err) {
+        console.error("[planner] re-batching after amendment failed:", err);
+      }
     }
 
-    phaseIndex += 1;
+    batchIndex += 1;
   }
 
   if (!ledger.outcome) {
@@ -409,6 +483,11 @@ export async function runIterativePlan({
   // ── L1: merge phase-level artifacts into a run-level list ──
   const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
   ledger.artifacts = mergeArtifactHistory(allArtifacts);
+
+  ledger.maxParallelism = (ledger.batches ?? []).reduce(
+    (max, b) => Math.max(max, (b.phaseIds ?? []).length),
+    0
+  );
 
   return {
     outcome: ledger.outcome,
