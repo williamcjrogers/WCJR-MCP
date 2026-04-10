@@ -3911,22 +3911,135 @@ function startWebhookServer() {
         return;
       }
 
-      // --- n8n trigger ---
+      // --- n8n trigger (L3a: server-side spawn + bearer token auth) ---
       if (req.method === "POST" && req.url === "/api/n8n/trigger") {
+        // Bearer token auth — required
+        const expectedToken =
+          appConfig?.webhookAuthToken ??
+          process.env.WCJR_WEBHOOK_TOKEN ??
+          null;
+        if (!expectedToken) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: false,
+            error: "Webhook auth token not configured. Set appConfig.webhookAuthToken or WCJR_WEBHOOK_TOKEN env var."
+          }));
+          return;
+        }
+        const authHeader = req.headers["authorization"] ?? "";
+        if (
+          typeof authHeader !== "string" ||
+          !authHeader.startsWith("Bearer ") ||
+          authHeader.slice(7).trim() !== expectedToken
+        ) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "invalid or missing bearer token" }));
+          return;
+        }
+
+        // Parse payload
         let parsed;
         try {
           parsed = JSON.parse(rawBody.toString());
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Invalid JSON" }));
+          res.end(JSON.stringify({ ok: false, error: "Invalid JSON" }));
           return;
         }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("assistant:n8nTrigger", parsed);
+
+        const prompt = typeof parsed.prompt === "string" ? parsed.prompt.trim() : "";
+        if (!prompt) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "missing required field: prompt" }));
+          return;
         }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-        return;
+
+        // Still notify renderer that a webhook fired (for the banner)
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          try {
+            mainWindow.webContents.send("assistant:n8nTrigger", parsed);
+          } catch (err) {
+            console.warn("[n8n webhook] renderer notify failed:", err?.message ?? err);
+          }
+        }
+
+        // Build remoteOrigin for webhook channel
+        const webhookRequestId = `wh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const remoteOrigin = {
+          channel: "webhook",
+          source: "n8n",
+          webhookRequestId,
+          callbackUrl: typeof parsed.callbackUrl === "string" ? parsed.callbackUrl : null,
+          at: new Date().toISOString()
+        };
+
+        // Spawn task via the existing runAssistantTaskRequest path.
+        // Because Task 1 made ambient sources (remoteOrigin set) default to
+        // iterative mode, the webhook task will automatically run through the
+        // L0-L2 critic/artifact/parallel-fanout pipeline.
+        try {
+          const taskPayload = {
+            prompt,
+            taskType: typeof parsed.taskType === "string" ? parsed.taskType : undefined,
+            modelOverride: typeof parsed.modelOverride === "string" ? parsed.modelOverride : undefined
+          };
+          const runtime = { remoteOrigin };
+          const waitForCompletion = parsed.waitForCompletion === true;
+
+          if (waitForCompletion) {
+            // Synchronous mode: hold the HTTP response open until the task finishes.
+            // runAssistantTaskRequest awaits orchestrator.executeTask and only
+            // returns after the task completes (or fails).
+            let summary;
+            try {
+              summary = await runAssistantTaskRequest(taskPayload, runtime);
+            } catch (err) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                ok: false,
+                webhookRequestId,
+                error: err?.message ?? String(err)
+              }));
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              ok: true,
+              webhookRequestId,
+              taskId: summary?.taskId ?? null,
+              summary
+            }));
+            return;
+          }
+
+          // Async mode (default): acknowledge immediately with a 202,
+          // let the task run in the background. The webhookRequestId is
+          // the caller's correlation key; they can check the desktop app
+          // or (future L3b) poll GET /api/tasks/<taskId>.
+          const taskPromise = runAssistantTaskRequest(taskPayload, runtime).catch((err) => {
+            console.error("[n8n webhook] async task failed:", err?.message ?? err);
+          });
+          // Fire and forget
+          void taskPromise;
+
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: true,
+            webhookRequestId,
+            mode: "async",
+            note: "Task started in the background. Check the desktop app for status."
+          }));
+          return;
+        } catch (err) {
+          console.error("[n8n webhook] spawn failed:", err?.message ?? err);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            ok: false,
+            webhookRequestId,
+            error: err?.message ?? String(err)
+          }));
+          return;
+        }
       }
 
       // --- MCP tools listing (for n8n MCP Client Tool) ---
