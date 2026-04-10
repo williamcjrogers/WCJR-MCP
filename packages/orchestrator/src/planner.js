@@ -199,7 +199,8 @@ async function runPhase(phase, ctx) {
         phaseIntent: phase.title ?? phase.prompt,
         phaseResult: lastContent.slice(0, 3000),
         toolTraceSummary: summarizeToolTrace(phaseToolTrace),
-        artifacts: phaseEntry.artifacts
+        artifacts: phaseEntry.artifacts,
+        signal
       });
 
       phaseEntry.criticVerdicts.push(verdict);
@@ -344,7 +345,15 @@ export async function runIterativePlan({
       endedAt: null
     };
 
-    // ── L2: execute all phases in the batch in parallel, with per-batch cancellation ──
+    // ── L2: execute all phases in the batch in parallel ──
+    //
+    // Cancellation note: The controller below is passed to every runPhase in
+    // the batch and abort() is called in the error/escalate/retry-exhausted
+    // reconciliation branches. At L2 this is belt-and-braces: Promise.all
+    // only resolves once every sibling has settled, so abort() fires AFTER
+    // all siblings have already returned. The hook is in place so a future
+    // L2.x level can add mid-batch fail-fast (e.g. via Promise.race with a
+    // "first-failure" signal) without re-plumbing the signal everywhere.
     const controller = new AbortController();
 
     if (batch.length > 1) {

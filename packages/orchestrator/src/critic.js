@@ -108,7 +108,8 @@ export async function runCritic({
   phaseIntent,
   phaseResult,
   toolTraceSummary,
-  artifacts
+  artifacts,
+  signal
 }) {
   const userMessage = buildCriticPrompt({
     originalGoal,
@@ -132,7 +133,8 @@ export async function runCritic({
       ],
       taskType,
       skipTools: true,
-      suppressStream: true
+      suppressStream: true,
+      signal
     });
     return parseVerdict(result.content);
   } catch (err) {
