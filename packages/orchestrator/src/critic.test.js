@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildCriticPrompt, parseVerdict, VERDICT_SCHEMA_DECISIONS } from "./critic.js";
+import { buildCriticPrompt, parseVerdict, runCritic, VERDICT_SCHEMA_DECISIONS } from "./critic.js";
 
 test("buildCriticPrompt includes the original goal and phase result", () => {
   const prompt = buildCriticPrompt({
@@ -34,14 +34,14 @@ test("parseVerdict returns degraded accept for malformed JSON", () => {
   const verdict = parseVerdict("this is not json at all");
   assert.equal(verdict.decision, "accept");
   assert.equal(verdict.confidence, 0);
-  assert.equal(verdict._degraded, true);
+  assert.equal(verdict._parseError, true);
 });
 
 test("parseVerdict rejects unknown decision values", () => {
   const raw = JSON.stringify({ decision: "destroy", reasoning: "test", confidence: 1 });
   const verdict = parseVerdict(raw);
   assert.equal(verdict.decision, "accept");
-  assert.equal(verdict._degraded, true);
+  assert.equal(verdict._parseError, true);
 });
 
 test("VERDICT_SCHEMA_DECISIONS contains all four valid decisions", () => {
@@ -49,4 +49,44 @@ test("VERDICT_SCHEMA_DECISIONS contains all four valid decisions", () => {
     [...VERDICT_SCHEMA_DECISIONS].sort(),
     ["accept", "amend_plan", "escalate", "retry_phase"]
   );
+});
+
+test("runCritic degrades to accept when invokeModel throws", async () => {
+  const verdict = await runCritic({
+    invokeModel: async () => { throw new Error("network timeout"); },
+    criticModel: "test-model",
+    criticProvider: "test",
+    originalGoal: "goal",
+    taskType: "disputes",
+    planSummary: "plan",
+    phaseId: "p1",
+    phaseIntent: "intent",
+    phaseResult: "result"
+  });
+  assert.equal(verdict.decision, "accept");
+  assert.equal(verdict._parseError, true);
+});
+
+test("runCritic handles invokeModel returning undefined content", async () => {
+  const verdict = await runCritic({
+    invokeModel: async () => ({ content: undefined }),
+    criticModel: "test-model",
+    criticProvider: "test",
+    originalGoal: "goal",
+    taskType: "disputes",
+    planSummary: "plan",
+    phaseId: "p1",
+    phaseIntent: "intent",
+    phaseResult: "result"
+  });
+  assert.equal(verdict.decision, "accept");
+  assert.equal(verdict._parseError, true);
+});
+
+test("parseVerdict extracts JSON from fenced block with preamble", () => {
+  const raw = "Here is my verdict:\n```json\n{\"decision\":\"accept\",\"reasoning\":\"ok\",\"confidence\":0.85}\n```";
+  const verdict = parseVerdict(raw);
+  assert.equal(verdict.decision, "accept");
+  assert.equal(verdict.confidence, 0.85);
+  assert.equal(verdict._parseError, undefined);
 });

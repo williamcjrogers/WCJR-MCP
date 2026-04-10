@@ -50,23 +50,25 @@ export function buildCriticPrompt({
 
 export function parseVerdict(raw) {
   if (typeof raw !== "string" || !raw.trim()) {
-    return { decision: "accept", reasoning: "critic returned empty", confidence: 0, _degraded: true };
+    return { decision: "accept", reasoning: "critic returned empty", confidence: 0, _parseError: true };
   }
 
-  // Strip markdown fences if the model wrapped it
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  // Extract JSON from a fenced block if present (handles model preambles),
+  // otherwise fall back to the trimmed raw string.
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const cleaned = fenceMatch ? fenceMatch[1].trim() : raw.trim();
 
   let parsed;
   try {
     parsed = JSON.parse(cleaned);
   } catch {
     console.warn("[critic] malformed verdict JSON, degrading to accept");
-    return { decision: "accept", reasoning: `parse error: ${raw.slice(0, 120)}`, confidence: 0, _degraded: true };
+    return { decision: "accept", reasoning: `parse error: ${raw.slice(0, 120)}`, confidence: 0, _parseError: true };
   }
 
   if (!parsed || typeof parsed !== "object" || !VERDICT_SCHEMA_DECISIONS.has(parsed.decision)) {
     console.warn(`[critic] unknown decision '${parsed?.decision}', degrading to accept`);
-    return { decision: "accept", reasoning: "unknown decision value", confidence: 0, _degraded: true };
+    return { decision: "accept", reasoning: "unknown decision value", confidence: 0, _parseError: true };
   }
 
   return {
@@ -125,6 +127,6 @@ export async function runCritic({
     return parseVerdict(result.content);
   } catch (err) {
     console.error("[critic] invocation failed, degrading to accept:", err?.message ?? err);
-    return { decision: "accept", reasoning: `critic failed: ${err?.message ?? err}`, confidence: 0, _degraded: true };
+    return { decision: "accept", reasoning: `critic failed: ${err?.message ?? err}`, confidence: 0, _parseError: true };
   }
 }
