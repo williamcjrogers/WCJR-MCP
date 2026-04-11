@@ -1152,7 +1152,8 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 }
 .chip-muted { color: var(--muted); }
 .chip-action { cursor: pointer; }
-.chip-action:hover { border-color: var(--accent); color: var(--accent); box-shadow: var(--glow); }
+.chip-action:hover { border-color: var(--accent); color: var(--accent); box-shadow: var(--glow); transform: scale(1.02); }
+.chip-action:active { transform: scale(0.98); }
 
 /* ─── TEXTAREA ────────────────────────────────────────────────────── */
 

@@ -349,7 +349,7 @@ async function collectLookeenResults({
     return [];
   }
 
-  emitStatus?.("Retrieval broker: querying Lookeen...");
+  emitStatus?.("Searching indexed files...");
   try {
     const lookeenQuery = buildLookeenQuery(prompt, searchPhrase);
     if (!lookeenQuery) {
@@ -476,7 +476,7 @@ async function collectFilesystemResults({
   )].slice(0, 4);
 
   if (explicitPaths.length > 0 && (server.tools ?? []).includes("list_directory")) {
-    emitStatus?.("Retrieval broker: inspecting explicit folder...");
+    emitStatus?.("Looking in the folder you mentioned...");
     for (const explicitPath of explicitPaths) {
       try {
         const listResult = await mcpHub.callTool(server.name, "list_directory", {
@@ -497,15 +497,20 @@ async function collectFilesystemResults({
             candidatePaths.add(filePath);
           }
         }
-      } catch {
+      } catch (err) {
         // If the explicit path is a file or list_directory is not applicable, fall through
         // and let extract_document_text attempt direct extraction on the original path.
+        console.warn(
+          `[retrieval] list_directory fallthrough for '${explicitPath}': ${
+            err instanceof Error ? err.message : err
+          }`
+        );
       }
     }
   }
 
   if (explicitPaths.length === 0 && (server.tools ?? []).includes("search_text_in_files") && searchPhrase) {
-    emitStatus?.("Retrieval broker: searching local text files...");
+    emitStatus?.("Scanning local files for context...");
     try {
       const searchResult = await mcpHub.callTool(server.name, "search_text_in_files", {
         query: searchPhrase,
@@ -561,7 +566,7 @@ async function collectFilesystemResults({
 
   const paths = [...candidatePaths].slice(0, 6);
   if ((server.tools ?? []).includes("extract_document_text")) {
-    emitStatus?.("Retrieval broker: extracting document text...");
+    emitStatus?.("Reading document contents...");
     for (const filePath of paths) {
       try {
         const extractResult = await mcpHub.callTool(server.name, "extract_document_text", {
@@ -636,7 +641,7 @@ async function collectMailResults({
   const mailMaxChars = extractMaxCharsHint(prompt, 30000);
 
   if ((server.tools ?? []).includes("search_messages") && searchPhrase) {
-    emitStatus?.("Retrieval broker: searching Outlook mail...");
+    emitStatus?.("Searching your mailbox...");
     try {
       const searchResult = await mcpHub.callTool(server.name, "search_messages", {
         query: searchPhrase,
@@ -832,7 +837,8 @@ export async function buildRetrievalContext({
   serverContexts,
   mcpHub,
   emitStatus,
-  memoryItems = []
+  memoryItems = [],
+  strategy = {}
 }) {
   if (!shouldUseRetrievalContext(prompt, taskType)) {
     return {
@@ -846,20 +852,40 @@ export async function buildRetrievalContext({
   const searchPhrase = buildSearchPhrase(prompt, promptTokens);
   const urlHints = extractUrlHints(prompt);
   const toolActivity = [];
+  const explicitPaths = extractPathHints(prompt);
+  const hasExplicitFile = explicitPaths.some((p) => /\.\w{1,8}$/.test(p));
 
   const filesystemServer = serverContexts.find((server) => server.kind === "builtin-filesystem");
   const mailServer = serverContexts.find((server) => server.kind === "builtin-mail-calendar");
   const browserServer = serverContexts.find((server) => server.kind === "builtin-browser-ops");
   const lookeenServer = pickLookeenServer(serverContexts);
 
+  // Smart retrieval: only run collectors appropriate for the task
+  const useFilesystem = strategy.useFilesystem !== false;
+  const useMail = strategy.useMail === true;
+  const useWeb = strategy.useWeb === true;
+  const useLookeen = strategy.useLookeen === true;
+
+  const collectors = [
+    collectMemoryResults({ memoryItems, promptTokens })
+  ];
+
+  if (useFilesystem || hasExplicitFile) {
+    collectors.push(collectFilesystemResults({ server: filesystemServer, mcpHub, prompt, promptTokens, searchPhrase, emitStatus, toolActivity }));
+  }
+  if (useMail && !hasExplicitFile) {
+    collectors.push(collectMailResults({ server: mailServer, mcpHub, prompt, promptTokens, searchPhrase, emitStatus, toolActivity }));
+  }
+  if (useWeb && !hasExplicitFile) {
+    collectors.push(collectBrowserResults({ server: browserServer, mcpHub, urlHints, toolActivity }));
+  }
+  if (useLookeen && !hasExplicitFile) {
+    collectors.push(collectLookeenResults({ server: lookeenServer, mcpHub, prompt, searchPhrase, promptTokens, emitStatus, toolActivity }));
+  }
+
   const results = dedupeResults(
-    [
-      ...(await collectMemoryResults({ memoryItems, promptTokens })),
-      ...(await collectLookeenResults({ server: lookeenServer, mcpHub, prompt, searchPhrase, promptTokens, emitStatus, toolActivity })),
-      ...(await collectFilesystemResults({ server: filesystemServer, mcpHub, prompt, promptTokens, searchPhrase, emitStatus, toolActivity })),
-      ...(await collectMailResults({ server: mailServer, mcpHub, prompt, promptTokens, searchPhrase, emitStatus, toolActivity })),
-      ...(await collectBrowserResults({ server: browserServer, mcpHub, urlHints, toolActivity }))
-    ]
+    (await Promise.all(collectors))
+      .flat()
       .filter((item) => item?.snippet)
       .sort((a, b) => b.score - a.score)
   ).slice(0, 6);

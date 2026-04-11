@@ -1,7 +1,7 @@
 {
   "name": "wcjr-mcp-assistant",
-  "version": "0.1.0",
-  "description": "Desktop-first local assistant with multi-provider routing, MCP tools, and optional NemoClaw sandboxed runs.",
+  "version": "1.0.0",
+  "description": "Production operator console: autonomous multi-phase executor with iterative critique, persistent memory, artifact tracking, parallel workflows, and full MCP catalog.",
   "author": "WCJR",
   "private": true,
   "type": "module",

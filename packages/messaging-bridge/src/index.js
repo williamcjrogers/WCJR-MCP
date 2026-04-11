@@ -1,13 +1,15 @@
 import { createTelegramChannel } from "./telegram.js";
+import { createWhatsAppChannel } from "./whatsapp.js";
 import { createStubChannel } from "./stub.js";
 
 export { MessagingBridgeContract } from "./contract.js";
 export { createTelegramChannel } from "./telegram.js";
+export { createWhatsAppChannel } from "./whatsapp.js";
 export { createStubChannel } from "./stub.js";
 
 /**
  * Create a channel by type.
- * @param { 'telegram' | 'stub' } type
+ * @param { 'telegram' | 'whatsapp' | 'stub' } type
  * @param { object } config
  * @returns { import("./contract.js").MessagingBridgeContract }
  */
@@ -15,6 +17,8 @@ export function createChannel(type, config = {}) {
   switch (type) {
     case "telegram":
       return createTelegramChannel(config);
+    case "whatsapp":
+      return createWhatsAppChannel(config);
     case "stub":
     default:
       return createStubChannel();

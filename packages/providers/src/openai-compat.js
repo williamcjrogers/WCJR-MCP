@@ -1,3 +1,5 @@
+import { classifyProviderError, withRetry } from "./errors.js";
+
 function normalizeTextContent(value) {
   if (typeof value === "string") {
     return value;
@@ -76,32 +78,14 @@ function normalizeToolCalls(toolCallsByIndex) {
 }
 
 
-function isRetryable(err) {
-  const status = err?.status ?? err?.statusCode ?? 0;
-  if (status === 429 || status === 502 || status === 503) return true;
-  const code = String(err?.code ?? "");
-  return code === "ECONNRESET" || code === "ETIMEDOUT" || code === "ECONNREFUSED";
-}
-
-async function withRetry(fn, maxAttempts = 3) {
-  let lastErr;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try { return await fn(); } catch (err) {
-      lastErr = err;
-      if (!isRetryable(err) || attempt === maxAttempts - 1) throw err;
-      await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 1000));
-    }
-  }
-  throw lastErr;
-}
-
 export async function openaiCompatibleStream({
   client,
   model,
   messages,
   tools,
   onChunk,
-  signal
+  signal,
+  provider = "openai"
 }) {
   const params = {
     model,
@@ -109,18 +93,27 @@ export async function openaiCompatibleStream({
     stream: true,
     stream_options: {
       include_usage: true
-    }
+    },
+    max_completion_tokens: 32000
   };
   if (tools?.length) {
     params.tools = tools;
   }
 
-  const response = await client.chat.completions.create(params, signal ? { signal } : undefined);
+  let response;
+  try {
+    response = await withRetry(() =>
+      client.chat.completions.create(params, signal ? { signal } : undefined)
+    );
+  } catch (err) {
+    throw classifyProviderError(provider, err, { model });
+  }
 
   let fullText = "";
   let usage = null;
   const toolCallsByIndex = new Map();
 
+  try {
   for await (const chunk of response) {
     if (chunk.usage) {
       usage = mapUsage(chunk.usage);
@@ -154,6 +147,9 @@ export async function openaiCompatibleStream({
 
       toolCallsByIndex.set(index, current);
     }
+  }
+  } catch (err) {
+    throw classifyProviderError(provider, err, { model });
   }
 
   const toolCalls = normalizeToolCalls(toolCallsByIndex);

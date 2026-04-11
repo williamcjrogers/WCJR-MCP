@@ -57,7 +57,10 @@ test("runToolLoop records timeouts as tool errors", async () => {
 
   assert.equal(result.content, "The file read timed out.");
   assert.equal(result.toolTrace[0].status, "error");
-  assert.match(result.toolTrace[0].resultPreview, /Timed out after 5ms/);
+  // formatMcpError now surfaces a human-readable timeout message instead of
+  // the raw "Timed out after Nms" from withTimeout().
+  assert.match(result.toolTrace[0].resultPreview, /timed out — skipped/);
+  assert.match(result.toolTrace[0].error, /timed out — skipped/);
 });
 
 test("runToolLoop falls back to a final generation after max iterations", async () => {

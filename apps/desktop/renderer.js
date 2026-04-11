@@ -739,6 +739,16 @@ function resetStreamingState() {
   streamingStatusText = "";
 }
 
+function handleExecutionError(source, err) {
+  logError(source, err);
+  if (els && els.btnRun) els.btnRun.disabled = false;
+  if (els && els.btnApprovePlan) els.btnApprovePlan.disabled = false;
+  if (typeof resetRoutingStatus === "function") resetRoutingStatus();
+  if (typeof resetStreamingState === "function") resetStreamingState();
+  if (typeof refreshActiveConversation === "function") refreshActiveConversation();
+  if (typeof refreshTaskList === "function") refreshTaskList();
+}
+
 function formatMessageDate(isoString) {
   if (!isoString) return "";
   return new Date(isoString).toLocaleDateString(undefined, {
@@ -903,6 +913,7 @@ function normalizeWorkflowPreview(preview) {
       parallelGroup: phase.parallelGroup ?? 0,
       dependsOn: Array.isArray(phase.dependsOn) ? phase.dependsOn : [],
       approvalRequired: phase.approvalRequired === true,
+      attempts: phase.attempts ?? 1,
       promptPreview: compactWhitespace(phase.promptPreview ?? phase.prompt ?? ""),
       status: phase.status ?? null
     }))
@@ -937,6 +948,7 @@ function renderWorkflowPreviewCard(preview, { compact = false } = {}) {
         phase.status ? phase.status.replace(/_/g, " ") : "",
         phase.activityLabel,
         phase.model ? phase.model : `${phase.depth} tier`,
+        phase.attempts > 1 ? `attempt ${phase.attempts}` : "",
         dependsOn.length ? `after ${dependsOn.join(", ")}` : "",
         runsInParallel ? "runs in parallel" : "",
         phase.approvalRequired ? "approval required" : ""
@@ -3140,13 +3152,7 @@ function attachAssistantStreamHandlers() {
   });
 
   unsubError = api.onStreamError((err) => {
-    logError("assistant-stream", err?.error ?? err);
-    els.btnRun.disabled = false;
-    if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
-    resetRoutingStatus();
-    resetStreamingState();
-    refreshActiveConversation();
-    refreshTaskList();
+    handleExecutionError("assistant-stream", err?.error ?? err);
   });
 }
 
@@ -3179,20 +3185,10 @@ els.btnRun.addEventListener("click", async () => {
       executionMode: els.executionMode?.value ?? "plan_first"
     });
     if (result?.error) {
-      logError("runTask", result.error);
-      els.btnRun.disabled = false;
-      if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
-      resetRoutingStatus();
-      resetStreamingState();
-      await refreshActiveConversation();
+      handleExecutionError("runTask", result.error);
     }
   } catch (err) {
-    logError("runTask", err);
-    els.btnRun.disabled = false;
-    if (els.btnApprovePlan) els.btnApprovePlan.disabled = false;
-    resetRoutingStatus();
-    resetStreamingState();
-    await refreshActiveConversation();
+    handleExecutionError("runTask", err);
   }
 });
 
@@ -3222,20 +3218,10 @@ if (els.btnApprovePlan) {
         modelOverride: els.modelOverride.value || undefined
       });
       if (result?.error) {
-        logError("approvePlan", result.error);
-        els.btnRun.disabled = false;
-        els.btnApprovePlan.disabled = false;
-        resetRoutingStatus();
-        resetStreamingState();
-        await refreshActiveConversation();
+        handleExecutionError("approvePlan", result.error);
       }
     } catch (err) {
-      logError("approvePlan", err);
-      els.btnRun.disabled = false;
-      els.btnApprovePlan.disabled = false;
-      resetRoutingStatus();
-      resetStreamingState();
-      await refreshActiveConversation();
+      handleExecutionError("approvePlan", err);
     }
   });
 }

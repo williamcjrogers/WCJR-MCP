@@ -1,0 +1,133 @@
+volumes:
+  pg_data:
+  redis_data:
+  qdrant_storage:
+  qdrant_snapshots:
+  n8n_data:
+  waha_sessions:
+  waha_media:
+
+services:
+  # --- PostgreSQL (shared by n8n) ---
+  postgres:
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: "${PG_USER}"
+      POSTGRES_PASSWORD: "${PG_PASS}"
+      POSTGRES_DB: n8n
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d n8n"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Redis (n8n queue mode) ---
+  redis:
+    image: redis:7-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Qdrant vector database ---
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage:z
+      - qdrant_snapshots:/qdrant/snapshots:z
+    environment:
+      QDRANT__LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:6333/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- WAHA (WhatsApp bridge) ---
+  waha:
+    image: devlikeapro/waha-plus:noweb
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WAHA_API_KEY: "${WAHA_API_KEY}"
+      WHATSAPP_HOOK_URL: "http://host.docker.internal:${APP_PORT}/api/whatsapp/webhook"
+      WHATSAPP_HOOK_EVENTS: "message,session.status"
+      WHATSAPP_HOOK_HMAC_KEY: "${WAHA_HMAC_SECRET}"
+      WHATSAPP_DOWNLOAD_MEDIA: "true"
+      WAHA_RESTART_ALL_SESSIONS: "True"
+      WAHA_DASHBOARD_USERNAME: "${WAHA_DASH_USER:-admin}"
+      WAHA_DASHBOARD_PASSWORD: "${WAHA_DASH_PASS:-admin}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - waha_sessions:/app/.sessions
+      - waha_media:/app/.media
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # --- n8n main (queue mode) ---
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: "${PG_USER}"
+      DB_POSTGRESDB_PASSWORD: "${PG_PASS}"
+      N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}"
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: "6379"
+      WEBHOOK_URL: "http://host.docker.internal:5678/"
+      GENERIC_TIMEZONE: "${TZ}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  # --- n8n worker ---
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: always
+    command: worker
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: "${PG_USER}"
+      DB_POSTGRESDB_PASSWORD: "${PG_PASS}"
+      N8N_ENCRYPTION_KEY: "${N8N_ENCRYPTION_KEY}"
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: "6379"
+      N8N_DISABLE_ACTIVE_WORKFLOWS: "true"
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }

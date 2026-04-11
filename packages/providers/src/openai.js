@@ -1,27 +1,51 @@
 import OpenAI from "openai";
 import { openaiCompatibleStream } from "./openai-compat.js";
+import { openaiResponsesStream, requiresResponsesApi } from "./openai-responses.js";
+import { assertApiKey, classifyProviderError, withRetry } from "./errors.js";
 
 export const supportsTools = true;
 
+const PROVIDER_ID = "openai";
+
 export async function listModels(apiKey) {
-  const client = new OpenAI({ apiKey });
-  const models = [];
-  const page = await client.models.list();
-  for (const model of page.data) {
-    models.push({ id: model.id, name: model.id });
+  assertApiKey(PROVIDER_ID, apiKey);
+  try {
+    const client = new OpenAI({ apiKey });
+    const page = await withRetry(() => client.models.list());
+    const models = [];
+    for (const model of page.data) {
+      models.push({ id: model.id, name: model.id });
+    }
+    models.sort((a, b) => a.id.localeCompare(b.id));
+    return models;
+  } catch (err) {
+    throw classifyProviderError(PROVIDER_ID, err);
   }
-  models.sort((a, b) => a.id.localeCompare(b.id));
-  return models;
 }
 
 export async function stream({ apiKey, model, messages, tools, onChunk, signal }) {
+  assertApiKey(PROVIDER_ID, apiKey);
   const client = new OpenAI({ apiKey });
+
+  if (requiresResponsesApi(model)) {
+    return openaiResponsesStream({
+      client,
+      model,
+      messages,
+      tools,
+      onChunk,
+      signal,
+      provider: PROVIDER_ID
+    });
+  }
+
   return openaiCompatibleStream({
     client,
     model,
     messages,
     tools,
     onChunk,
-    signal
+    signal,
+    provider: PROVIDER_ID
   });
 }

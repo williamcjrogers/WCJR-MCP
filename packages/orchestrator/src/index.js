@@ -71,6 +71,10 @@ function assessTaskComplexity(prompt) {
   // Truly trivial: greetings, single-word commands
   if (wordCount <= 3 && /^(hi|hello|hey|thanks|ok|yes|no|test|ping|status)\b/.test(p)) return "trivial";
 
+  // Also trivial: direct one-shot tool asks (list/show/count files, read one email, etc).
+  // These should bypass the retrieval broker and just let the model call the right MCP tool.
+  if (/^\s*(can you |please |could you |would you )?(list|show|display|open|reveal|count|get|read|find|fetch|grab)\b[\s\S]{0,120}\b(files?|folders?|directories|directory|downloads?|desktop|documents?|emails?|messages?|inbox|events?|calendar)\b/.test(p)) return "trivial";
+
   // Complex: multi-step analytical work
   if (/\b(forensic|reconcile|compare|cross.?reference|across|between|all.*and.*all|every|audit|review.*and.*amend)\b/.test(p)) return "complex";
   if (wordCount > 50) return "complex";
@@ -103,13 +107,17 @@ function getRetrievalStrategy(complexity, taskType) {
       if (taskType === "disputes") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: true, useRag: true };
       return { skipRetrieval: false, useWeb: true, useMail: true, useFilesystem: true, useLookeen: true };
     default:
-      // Standard: use task type to guide
+      // Standard: use task type to guide. Default to SKIPPING retrieval for
+      // task types where the agent can just call MCP tools itself. Only opt
+      // in to the retrieval broker for task types where pre-fetching real
+      // context measurably helps (disputes/documents/data_analysis).
       if (taskType === "communication") return { skipRetrieval: false, useWeb: false, useMail: true, useFilesystem: false, useLookeen: false };
       if (taskType === "research") return { skipRetrieval: false, useWeb: true, useMail: false, useFilesystem: false, useLookeen: false };
       if (taskType === "documents" || taskType === "data_analysis") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: false };
-      if (taskType === "coding" || taskType === "automation") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: false };
       if (taskType === "disputes") return { skipRetrieval: false, useWeb: false, useMail: false, useFilesystem: true, useLookeen: true, useRag: true };
-      return { skipRetrieval: false, useWeb: true, useMail: false, useFilesystem: true, useLookeen: false };
+      // project_mgmt, orchestrator, creative, aws_cloud, coding, automation:
+      // agent calls tools directly; no pre-flight retrieval broker noise.
+      return { skipRetrieval: true };
   }
 }
 
@@ -1354,8 +1362,24 @@ export class Orchestrator {
     const retrievalStrategy = getRetrievalStrategy(complexity, resolvedTaskType);
     timeline.push({ stage: "strategy", detail: `Complexity: ${complexity} | Web: ${!!retrievalStrategy.useWeb} | Mail: ${!!retrievalStrategy.useMail} | Files: ${!!retrievalStrategy.useFilesystem}` });
 
+    // ── Tool discovery ALWAYS runs — agent needs its tools regardless of
+    //    whether the retrieval broker is going to pre-fetch context. ──
+    {
+      const configuredServers = this.mcpHub.getServers().filter((server) => server.enabled !== false);
+      const statuses = this.mcpHub.getStatuses();
+      const hasConnectedServer = statuses.some((status) => status.status === "connected");
+
+      if (configuredServers.length > 0 && !hasConnectedServer) {
+        emitStatus("Connecting MCP tools...");
+        await this.connectMcp();
+      }
+
+      toolSummary = await this.mcpHub.getToolSummary();
+    }
+
+    // ── Retrieval broker is separate: only runs when the strategy says so ──
     if (retrievalStrategy.skipRetrieval) {
-      timeline.push({ stage: "shortcut", detail: "Trivial task — skipping retrieval" });
+      timeline.push({ stage: "shortcut", detail: "Trivial task — skipping retrieval broker" });
     } else if (runMode === "sandboxed") {
       const collected = await this.collectToolContext(
         prompt,
@@ -1370,16 +1394,6 @@ export class Orchestrator {
       contextSections = collected.contextSections;
     } else {
       const configuredServers = this.mcpHub.getServers().filter((server) => server.enabled !== false);
-      const statuses = this.mcpHub.getStatuses();
-      const hasConnectedServer = statuses.some((status) => status.status === "connected");
-
-      if (configuredServers.length > 0 && !hasConnectedServer) {
-        emitStatus("Connecting MCP tools...");
-        await this.connectMcp();
-      }
-
-      toolSummary = await this.mcpHub.getToolSummary();
-
       if (configuredServers.length > 0) {
         const collected = await this.collectToolContext(
           prompt,

@@ -36,7 +36,9 @@ export class MCPHub {
     const activeServerNames = new Set(servers.map((server) => server.name));
     for (const [serverName, connection] of this.connections.entries()) {
       if (!activeServerNames.has(serverName)) {
-        connection.client.close().catch(() => undefined);
+        connection.client.close().catch((err) => {
+          console.warn(`[mcp-hub] failed to close removed server '${serverName}':`, err?.message ?? err);
+        });
         this.connections.delete(serverName);
         this.statuses.delete(serverName);
       }
@@ -66,8 +68,11 @@ export class MCPHub {
     if (this.connections.has(server.name)) {
       try {
         await this.connections.get(server.name).client.close();
-      } catch {
-        // Ignore stale connection cleanup failures.
+      } catch (err) {
+        console.warn(
+          `[mcp-hub] failed to close stale connection for '${server.name}':`,
+          err instanceof Error ? err.message : err
+        );
       }
       this.connections.delete(server.name);
     }
@@ -115,7 +120,13 @@ export class MCPHub {
       if (!server.url) {
         throw new Error(`Server '${server.name}' is missing a URL`);
       }
-      transport = new StreamableHTTPClientTransport(new URL(server.url));
+      const httpOptions = {};
+      if (server.authToken) {
+        httpOptions.requestInit = {
+          headers: { Authorization: `Bearer ${server.authToken}` }
+        };
+      }
+      transport = new StreamableHTTPClientTransport(new URL(server.url), httpOptions);
     } else {
       throw new Error(`Unsupported transport '${server.transport}'`);
     }
@@ -157,25 +168,46 @@ export class MCPHub {
     return settled;
   }
 
-  
   startHealthChecks(intervalMs = 60000) {
     if (this._healthCheckTimer) return;
     this._healthCheckTimer = setInterval(async () => {
-      for (const [serverName, client] of this._clients.entries()) {
+      // Snapshot entries up front — the map may be mutated by reconnect calls.
+      const entries = [...this.connections.entries()];
+      for (const [serverName, connection] of entries) {
         try {
           await Promise.race([
-            client.listTools(),
+            connection.client.listTools(),
             new Promise((_, rej) => setTimeout(() => rej(new Error("ping timeout")), 5000))
           ]);
-        } catch {
-          console.error(`[mcp-hub] Health check failed for ${serverName}, reconnecting...`);
-          this._clients.delete(serverName);
+        } catch (pingErr) {
+          const pingMsg = pingErr instanceof Error ? pingErr.message : String(pingErr);
+          console.error(
+            `[mcp-hub] Health check failed for '${serverName}' (${pingMsg}), attempting reconnect...`
+          );
+          this.connections.delete(serverName);
           this._toolSummaryCache = null;
-          const server = this._servers?.find?.((s) => s.name === serverName);
-          if (server) {
-            try { await this.connectServer(server); } catch (e) {
-              console.error(`[mcp-hub] Reconnect failed for ${serverName}: ${e.message}`);
-            }
+
+          const server = this.getServers().find((s) => s.name === serverName);
+          if (!server) {
+            console.warn(
+              `[mcp-hub] No server definition found for '${serverName}'; cannot reconnect.`
+            );
+            continue;
+          }
+          try {
+            await this.connectServer(server);
+            console.error(`[mcp-hub] Reconnected '${serverName}'.`);
+          } catch (reconnectErr) {
+            const reconnectMsg =
+              reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr);
+            console.error(`[mcp-hub] Reconnect failed for '${serverName}': ${reconnectMsg}`);
+            this.statuses.set(serverName, {
+              name: serverName,
+              status: "error",
+              error: reconnectMsg,
+              tools: [],
+              toolDetails: []
+            });
           }
         }
       }
@@ -207,7 +239,11 @@ async getToolSummary() {
           server: serverName,
           ...toolMetadata
         });
-      } catch {
+      } catch (err) {
+        console.warn(
+          `[mcp-hub] failed to list tools for '${serverName}':`,
+          err instanceof Error ? err.message : err
+        );
         summary.push({
           server: serverName,
           tools: [],
@@ -219,16 +255,21 @@ async getToolSummary() {
     return summary;
   }
 
-  async callTool(serverName, toolName, arguments_ = {}) {
+  async callTool(serverName, toolName, arguments_ = {}, options = {}) {
     const connection = this.connections.get(serverName);
     if (!connection) {
       throw new Error(`MCP server '${serverName}' is not connected`);
     }
 
-    return connection.client.callTool({
-      name: toolName,
-      arguments: arguments_
-    });
+    // Default 5 minute ceiling. Callers can override per-call for legitimately
+    // long tools (e.g. extract_document_text on huge PDFs).
+    const timeout = options.timeout ?? 300000;
+
+    return connection.client.callTool(
+      { name: toolName, arguments: arguments_ },
+      undefined,
+      { timeout }
+    );
   }
 
   async disconnectAll({ preserveStatuses = true } = {}) {

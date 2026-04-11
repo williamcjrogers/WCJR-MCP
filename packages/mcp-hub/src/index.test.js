@@ -75,6 +75,43 @@ test("MCPHub.connectAll isolates partial failures across servers", async () => {
   assert.equal(statuses.find((item) => item.name === "Server B")?.status, "error");
 });
 
+test("MCPHub.startHealthChecks iterates this.connections without ReferenceError", async () => {
+  const hub = new MCPHub({
+    mcpServers: [{ name: "Server A", enabled: true }]
+  });
+
+  let listCalls = 0;
+  let reconnectCalls = 0;
+  hub.connections.set("Server A", {
+    client: {
+      async listTools() {
+        listCalls += 1;
+        throw new Error("simulated failure");
+      }
+    }
+  });
+
+  hub.connectServer = async (server) => {
+    reconnectCalls += 1;
+    const status = { name: server.name, status: "connected", tools: [], toolDetails: [] };
+    hub.statuses.set(server.name, status);
+    return status;
+  };
+
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    hub.startHealthChecks(10);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    hub.stopHealthChecks();
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.ok(listCalls >= 1, "listTools should have been called at least once");
+  assert.ok(reconnectCalls >= 1, "connectServer should have been invoked for reconnect");
+});
+
 test("MCPHub.disconnectAll waits for all closes and clears connections", async () => {
   const hub = new MCPHub({
     mcpServers: [{ name: "Server A", enabled: true }]

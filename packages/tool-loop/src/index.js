@@ -68,6 +68,27 @@ function getToolResultMaxChars(tool, args = {}) {
   }
 }
 
+// Some tools are legitimately slow (large PDFs, recursive crawls). Let them
+// run longer than the default tool-loop timeout, but still cap them so a stuck
+// subprocess can't hang the entire turn.
+const LONG_RUNNING_TOOL_TIMEOUT_MS = 5 * 60 * 1000;
+const LONG_RUNNING_TOOLS = new Set([
+  "extract_document_text",
+  "get_message_attachment_text",
+  "fetch_page_content",
+  "list_directory",
+  "search_files",
+  "indexer_scan"
+]);
+
+function getToolTimeoutMs(tool, fallbackMs) {
+  if (!fallbackMs || fallbackMs <= 0) return fallbackMs;
+  if (LONG_RUNNING_TOOLS.has(tool)) {
+    return Math.max(fallbackMs, LONG_RUNNING_TOOL_TIMEOUT_MS);
+  }
+  return fallbackMs;
+}
+
 function flattenToolContent(content = []) {
   return content
     .map((item) => {
@@ -215,11 +236,46 @@ function toToolCallChunk(type, payload) {
   return { type, ...payload };
 }
 
+function formatMcpError(err, { server, tool } = {}) {
+  if (!err) return "unknown error";
+
+  // MCP SDK errors expose a JSON-RPC numeric code.
+  const code = typeof err?.code === "number" ? err.code : null;
+  const rawMessage = err instanceof Error ? err.message : String(err ?? "");
+
+  // Prefer a concise message keyed off the JSON-RPC code.
+  if (code === -32001) {
+    return `${tool ?? "tool"} timed out — skipped`;
+  }
+  if (code === -32600) {
+    return `${tool ?? "tool"} received an invalid request`;
+  }
+  if (code === -32601) {
+    return `${server ?? "?"}.${tool ?? "?"} is not implemented by the server`;
+  }
+  if (code === -32602) {
+    return `${tool ?? "tool"} rejected the arguments as invalid`;
+  }
+  if (code === -32603) {
+    const short = truncateText(rawMessage.replace(/^MCP error -32603:?\s*/i, ""), 160);
+    return `${tool ?? "tool"} internal error: ${short}`;
+  }
+
+  // Timeouts that reach us via withTimeout() rather than the MCP error frame.
+  if (/timed out after \d+ms/i.test(rawMessage)) {
+    return `${tool ?? "tool"} timed out — skipped`;
+  }
+
+  // Strip the "MCP error -32XXX: " prefix when present so users see the cause.
+  const cleaned = rawMessage.replace(/^MCP error -?\d+:?\s*/i, "");
+  return truncateText(cleaned || "tool failed", 200);
+}
+
 function buildToolErrorMessage({ server, tool, message }) {
   return `${TOOL_RESULT_GUARDRAIL}Tool ${server}.${tool} failed.\n\nError: ${message}`;
 }
 
-function safeJsonParse(value) {
+function safeJsonParse(value, context = {}) {
   if (value == null || value === "") {
     return {};
   }
@@ -228,8 +284,20 @@ function safeJsonParse(value) {
   }
   try {
     return JSON.parse(value);
-  } catch {
-    return { input: value };
+  } catch (err) {
+    const preview = truncateText(String(value ?? ""), 200);
+    const label = context?.tool ? `${context.server ?? "?"}.${context.tool}` : "tool call";
+    console.warn(
+      `[tool-loop] ${label} returned malformed arguments JSON: ${
+        err instanceof Error ? err.message : err
+      }\n  raw: ${preview}`
+    );
+    return {
+      _parseError: true,
+      _parseErrorMessage: err instanceof Error ? err.message : String(err),
+      _rawArgs: String(value ?? ""),
+      input: value
+    };
   }
 }
 
@@ -366,7 +434,7 @@ export async function runToolLoop({
   onChunk,
   beforeToolCall,
   maxIterations = 10,
-  toolTimeoutMs = 60000,
+  toolTimeoutMs = 120000,
   signal
 }) {
   if (!adapter?.stream) {
@@ -422,8 +490,60 @@ export async function runToolLoop({
 
     for (const toolCall of toolCalls) {
       const parsed = parseToolCallName(toolCall.name);
-      const args = safeJsonParse(toolCall.args);
+      const args = safeJsonParse(toolCall.args, {
+        server: parsed?.server,
+        tool: parsed?.tool ?? toolCall.name
+      });
       const startedAt = Date.now();
+
+      if (args?._parseError && parsed?.server && parsed?.tool) {
+        const errorMessage = `Model returned malformed arguments JSON for ${parsed.server}.${parsed.tool}: ${args._parseErrorMessage}`;
+        const serializedError = buildToolErrorMessage({
+          server: parsed.server,
+          tool: parsed.tool,
+          message: errorMessage
+        });
+        const traceEntry = {
+          id: toolCall.id ?? `tool_${startedAt}`,
+          name: toolCall.name,
+          server: parsed.server,
+          tool: parsed.tool,
+          args,
+          status: "error",
+          durationMs: 0,
+          resultPreview: truncateText(serializedError, DEFAULT_TRACE_PREVIEW_CHARS),
+          error: errorMessage
+        };
+        toolTrace.push(traceEntry);
+        onChunk?.(
+          toToolCallChunk("tool_call", {
+            callId: traceEntry.id,
+            name: traceEntry.name,
+            server: traceEntry.server,
+            tool: traceEntry.tool,
+            args
+          })
+        );
+        onChunk?.(
+          toToolCallChunk("tool_result", {
+            callId: traceEntry.id,
+            name: traceEntry.name,
+            server: traceEntry.server,
+            tool: traceEntry.tool,
+            status: "error",
+            result: traceEntry.resultPreview,
+            error: errorMessage
+          })
+        );
+        messages.push({
+          role: "tool_result",
+          toolCallId: traceEntry.id,
+          name: toolCall.name,
+          status: "error",
+          content: serializedError
+        });
+        continue;
+      }
 
       if (!parsed?.server || !parsed?.tool) {
         const errorMessage = `Unknown tool call '${toolCall.name}'.`;
@@ -541,9 +661,10 @@ export async function runToolLoop({
           continue;
         }
 
+        const effectiveTimeoutMs = getToolTimeoutMs(parsed.tool, toolTimeoutMs);
         const rawResult = await withTimeout(
-          mcpHub.callTool(parsed.server, parsed.tool, args),
-          toolTimeoutMs,
+          mcpHub.callTool(parsed.server, parsed.tool, args, { timeout: effectiveTimeoutMs }),
+          effectiveTimeoutMs,
           signal
         );
         const serializedResult = serializeToolResult(rawResult, {
@@ -570,16 +691,16 @@ export async function runToolLoop({
           content: serializedResult
         });
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const friendly = formatMcpError(error, { server: parsed.server, tool: parsed.tool });
         const serializedError = buildToolErrorMessage({
           server: parsed.server,
           tool: parsed.tool,
-          message: errorMessage
+          message: friendly
         });
         traceEntry.status = "error";
         traceEntry.durationMs = Date.now() - startedAt;
         traceEntry.resultPreview = truncateText(serializedError, DEFAULT_TRACE_PREVIEW_CHARS);
-        traceEntry.error = errorMessage;
+        traceEntry.error = friendly;
         onChunk?.(
           toToolCallChunk("tool_result", {
             callId: traceEntry.id,
@@ -588,7 +709,7 @@ export async function runToolLoop({
             tool: traceEntry.tool,
             status: "error",
             result: traceEntry.resultPreview,
-            error: errorMessage
+            error: friendly
           })
         );
         messages.push({

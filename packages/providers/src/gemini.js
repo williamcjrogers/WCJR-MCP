@@ -1,6 +1,9 @@
 import { FunctionCallingConfigMode, GoogleGenAI } from "@google/genai";
+import { assertApiKey, classifyProviderError, withRetry } from "./errors.js";
 
 export const supportsTools = true;
+
+const PROVIDER_ID = "gemini";
 
 function abortError(signal) {
   const reason = signal?.reason;
@@ -78,39 +81,26 @@ function mapUsage(usageMetadata) {
 }
 
 
-function isRetryable(err) {
-  const status = err?.status ?? err?.statusCode ?? 0;
-  if (status === 429 || status === 502 || status === 503) return true;
-  const code = String(err?.code ?? "");
-  return code === "ECONNRESET" || code === "ETIMEDOUT";
-}
-
-async function withRetry(fn, maxAttempts = 3) {
-  let lastErr;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try { return await fn(); } catch (err) {
-      lastErr = err;
-      if (!isRetryable(err) || attempt === maxAttempts - 1) throw err;
-      await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 1000));
-    }
-  }
-  throw lastErr;
-}
-
 export async function listModels(apiKey) {
-  const ai = new GoogleGenAI({ apiKey });
-  const models = [];
-  const pager = await ai.models.list();
-  for await (const model of pager) {
-    if (model.name) {
-      const id = model.name.replace("models/", "");
-      models.push({ id, name: model.displayName ?? id });
+  assertApiKey(PROVIDER_ID, apiKey);
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+    const models = [];
+    const pager = await withRetry(() => ai.models.list());
+    for await (const model of pager) {
+      if (model.name) {
+        const id = model.name.replace("models/", "");
+        models.push({ id, name: model.displayName ?? id });
+      }
     }
+    return models;
+  } catch (err) {
+    throw classifyProviderError(PROVIDER_ID, err);
   }
-  return models;
 }
 
 export async function stream({ apiKey, model, messages, tools, onChunk, signal }) {
+  assertApiKey(PROVIDER_ID, apiKey);
   if (signal?.aborted) {
     throw abortError(signal);
   }
@@ -122,7 +112,13 @@ export async function stream({ apiKey, model, messages, tools, onChunk, signal }
 
   const contents = userMessages.map(toGeminiContent).filter(Boolean);
 
-  const config = {};
+  const config = {
+    maxOutputTokens: 65536
+  };
+  // Enable thinking for Gemini 2.5+ models
+  if (model.includes("2.5") || model.includes("3.")) {
+    config.thinkingConfig = { thinkingBudget: 16384 };
+  }
   if (systemMsg) {
     config.systemInstruction = systemMsg.content;
   }
@@ -145,35 +141,42 @@ export async function stream({ apiKey, model, messages, tools, onChunk, signal }
     ];
   }
 
-  const response = await withRetry(() => ai.models.generateContentStream({
-    model,
-    contents,
-    config
-  }));
+  let response;
+  try {
+    response = await withRetry(() =>
+      ai.models.generateContentStream({ model, contents, config })
+    );
+  } catch (err) {
+    throw classifyProviderError(PROVIDER_ID, err, { model });
+  }
 
   let fullText = "";
   const toolCalls = [];
   let usage = null;
-  for await (const chunk of response) {
-    if (signal?.aborted) {
-      throw abortError(signal);
-    }
+  try {
+    for await (const chunk of response) {
+      if (signal?.aborted) {
+        throw abortError(signal);
+      }
 
-    const text = chunk.text ?? chunk.candidates?.[0]?.content?.parts?.map(normalizeText).join("") ?? "";
-    if (text) {
-      fullText += text;
-      onChunk?.({ type: "text", text });
-    }
+      const text = chunk.text ?? chunk.candidates?.[0]?.content?.parts?.map(normalizeText).join("") ?? "";
+      if (text) {
+        fullText += text;
+        onChunk?.({ type: "text", text });
+      }
 
-    for (const functionCall of collectFunctionCalls(chunk)) {
-      toolCalls.push({
-        id: functionCall.id ?? `tool_call_${toolCalls.length}`,
-        name: functionCall.name,
-        args: JSON.stringify(functionCall.args ?? {})
-      });
-    }
+      for (const functionCall of collectFunctionCalls(chunk)) {
+        toolCalls.push({
+          id: functionCall.id ?? `tool_call_${toolCalls.length}`,
+          name: functionCall.name,
+          args: JSON.stringify(functionCall.args ?? {})
+        });
+      }
 
-    usage = mapUsage(chunk.usageMetadata) ?? usage;
+      usage = mapUsage(chunk.usageMetadata) ?? usage;
+    }
+  } catch (err) {
+    throw classifyProviderError(PROVIDER_ID, err, { model });
   }
 
   return {

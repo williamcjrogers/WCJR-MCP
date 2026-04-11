@@ -46,7 +46,7 @@ const DEFAULT_CONFIG = {
   modelTiers: { ...DEFAULT_MODEL_TIERS },
   modelCache: {},
   mcpServers: [],
-  executionMode: "plan_first",
+  executionMode: "direct",
   sandbox: {
     distro: "Ubuntu-24.04",
     gatewayName: "nemoclaw",
@@ -178,7 +178,7 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 const startupLogPath = path.join(
   process.env.TEMP || process.cwd(),
-  "wcjr-assistant-startup.log"
+  "wcjr-operator-startup.log"
 );
 
 if (!gotSingleInstanceLock) {
@@ -1223,7 +1223,8 @@ async function loadConfig() {
   try {
     const json = await fs.readFile(configPath(), "utf-8");
     config = JSON.parse(json);
-  } catch {
+  } catch (err) {
+    logStartup("Failed to load config, using defaults", err);
     config = { ...DEFAULT_CONFIG };
   }
   config.mcpServers = mergeBuiltinServers(config.mcpServers ?? []);
@@ -1233,7 +1234,7 @@ async function loadConfig() {
 
 async function saveConfig() {
   configSaveQueue = configSaveQueue
-    .catch(() => undefined)
+    .catch((err) => { logStartup("Config save queue failed", err); return undefined; })
     .then(async () => {
       await fs.mkdir(path.dirname(configPath()), { recursive: true });
       const serializableConfig = {
@@ -2334,7 +2335,7 @@ function createWindow() {
     height: 940,
     minWidth: 900,
     minHeight: 600,
-    title: "WCJR Assistant",
+    title: "WCJR Operator",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
@@ -2342,6 +2343,7 @@ function createWindow() {
       sandbox: true
     }
   });
+  mainWindow.webContents.openDevTools();
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
       shell.openExternal(url).catch(() => {});
@@ -2391,7 +2393,7 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
   const remoteOrigin = runtime.remoteOrigin ?? null;
   const policyApproved = runtime.policyApproved === true;
   const { skillId, prompt } = parseSkillCommand(rawPrompt);
-  const planExecutionMode = executionMode ?? appConfig.executionMode ?? "plan_first";
+  const planExecutionMode = executionMode ?? appConfig.executionMode ?? "direct";
   appConfig.executionMode = planExecutionMode;
   await saveConfig();
   const taskTypeTrim = taskType?.trim();
@@ -2791,7 +2793,7 @@ function getBootstrapStatePayload() {
     modelProfiles: appConfig.modelProfiles,
     taskTypes: orchestrator.getTaskTypes(),
     activityProfiles: buildActivityProfileState(),
-    executionMode: appConfig.executionMode ?? "plan_first",
+    executionMode: appConfig.executionMode ?? "direct",
     sandboxPreference: appConfig.sandboxPreference ?? "manual",
     theme: appConfig.theme ?? "midnight",
     themeIds: THEME_IDS,

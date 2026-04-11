@@ -371,10 +371,10 @@ server.registerTool(
 server.registerTool(
   "extract_document_text",
   {
-    description: "Extract readable text from a local file. Supports text, DOCX, PDF, and common image formats via OCR.",
+    description: "Extract readable text from a local file. Supports text, XLSX, XLS, DOCX, PDF, CSV, and common image formats via OCR.",
     inputSchema: {
       path: z.string().describe("Absolute or relative path to the file inside the allowed root."),
-      maxChars: z.number().int().min(500).max(50000).optional().describe("Maximum characters to return.")
+      maxChars: z.number().int().min(500).max(500000).optional().describe("Maximum characters to return.")
     }
   },
   async ({ path: requestedPath, maxChars = 50000 }) => {
