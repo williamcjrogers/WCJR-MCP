@@ -72,8 +72,15 @@ function assessTaskComplexity(prompt) {
   if (wordCount <= 3 && /^(hi|hello|hey|thanks|ok|yes|no|test|ping|status)\b/.test(p)) return "trivial";
 
   // Also trivial: direct one-shot tool asks (list/show/count files, read one email, etc).
-  // These should bypass the retrieval broker and just let the model call the right MCP tool.
-  if (/^\s*(can you |please |could you |would you )?(list|show|display|open|reveal|count|get|read|find|fetch|grab)\b[\s\S]{0,120}\b(files?|folders?|directories|directory|downloads?|desktop|documents?|emails?|messages?|inbox|events?|calendar)\b/.test(p)) return "trivial";
+  // Covers imperatives ("list files") AND question-form ("what are the latest files",
+  // "how many emails"). These should bypass the retrieval broker and just let the
+  // model call the right MCP tool.
+  const trivialSubject = /\b(files?|folders?|directories|directory|downloads?|desktop|documents?|emails?|messages?|inbox|events?|calendar|contents?)\b/;
+  const trivialImperative = /^\s*(can you |please |could you |would you )?(list|show|display|open|reveal|count|get|read|find|fetch|grab|tell me|give me)\b/;
+  const trivialQuestion = /^\s*(what|where|which|how many|how much|are there|is there)\b/;
+  if ((trivialImperative.test(p) || trivialQuestion.test(p)) && trivialSubject.test(p) && wordCount <= 25) {
+    return "trivial";
+  }
 
   // Complex: multi-step analytical work
   if (/\b(forensic|reconcile|compare|cross.?reference|across|between|all.*and.*all|every|audit|review.*and.*amend)\b/.test(p)) return "complex";
@@ -207,6 +214,13 @@ function inferTaskType(prompt) {
     return "communication";
   }
   if (text.includes("automate") || text.includes("script") || text.includes("cleanup")) {
+    return "automation";
+  }
+  // File / folder operations route to automation (filesystem + fileOps + desktop presets)
+  if (
+    /\b(files?|folders?|directories|directory|downloads?|desktop|trash|recycle bin)\b/.test(text) &&
+    /\b(list|show|display|open|read|count|find|fetch|grab|tell me|give me|what are|where are|which|how many|latest|recent|newest|oldest)\b/.test(text)
+  ) {
     return "automation";
   }
   if (text.includes("creative") || text.includes("brainstorm") || text.includes("idea")) {
@@ -984,7 +998,7 @@ export class Orchestrator {
     const hasConnectedServer = statuses.some((status) => status.status === "connected");
 
     if (configuredServers.length > 0 && !hasConnectedServer) {
-      emitStatus("Connecting MCP tools...");
+      emitStatus("Getting my tools ready...");
       await this.connectMcp();
     }
 
@@ -1213,7 +1227,7 @@ export class Orchestrator {
         continue;
       }
 
-      emitStatus(`Orchestrator (${providerId} / ${candidateModel})...`);
+      emitStatus("Planning the best approach...");
       try {
         const result = await this.options.invokeModel({
           providerId,
@@ -1278,7 +1292,7 @@ export class Orchestrator {
           stage: "fallback",
           detail: `${candidateModel}: ${reason}`
         });
-        emitStatus(`Routing: ${candidateModel} unavailable (${reason}) — trying next model...`);
+        emitStatus(`Switching to a different model...`);
       }
     }
 
@@ -1370,7 +1384,7 @@ export class Orchestrator {
       const hasConnectedServer = statuses.some((status) => status.status === "connected");
 
       if (configuredServers.length > 0 && !hasConnectedServer) {
-        emitStatus("Connecting MCP tools...");
+        emitStatus("Getting my tools ready...");
         await this.connectMcp();
       }
 
@@ -1437,7 +1451,7 @@ export class Orchestrator {
         message.content.trim().length > 0
     );
     const systemMessage = [
-      "You are a highly capable personal assistant. Be concise, accurate, and actionable.",
+      "You are a capable personal assistant. Talk like a real person, not a robot. When working on a task, briefly narrate what you are doing as you go (e.g. \"Looking in your Downloads folder now...\", \"Found 10 files, here are the most recent ones...\"). Keep it natural and concise. Never dump raw technical output without context. Always lead with a short human sentence explaining what you found or did, then show the result.",
       getSkillInstruction(skillId),
       memoryContext
         ? `Remembered user context:\n${memoryContext}\nUse these memories only when they are relevant, and ask for clarification if uncertain.`
@@ -1471,7 +1485,7 @@ export class Orchestrator {
         };
       }
 
-      emitStatus(`Routing this run through sandbox '${sandboxStatus.sandboxName}'...`);
+      emitStatus("Running this in a secure sandbox...");
       try {
         const sandboxPrompt = sanitizedConversationMessages.length
           ? [
@@ -1602,7 +1616,7 @@ export class Orchestrator {
           maxTokensTotal: 400000
         },
         systemMessage: [
-          "You are a highly capable personal assistant. Be concise, accurate, and actionable.",
+          "You are a capable personal assistant. Talk like a real person, not a robot. When working on a task, briefly narrate what you are doing as you go (e.g. \"Looking in your Downloads folder now...\", \"Found 10 files, here are the most recent ones...\"). Keep it natural and concise. Never dump raw technical output without context. Always lead with a short human sentence explaining what you found or did, then show the result.",
           getSkillInstruction(skillId),
           memoryContext ? `Remembered user context:\n${memoryContext}` : "",
           workspaceDir
@@ -1617,7 +1631,7 @@ export class Orchestrator {
 
       // Lesson writer — always runs on terminal state, never blocks
       if (this.options.memoryStore) {
-        emitStatus("Recording lesson...");
+        emitStatus("Saving what I learned for next time...");
         const lessonModel = criticModelId ?? selectedModel;
         const lessonProvider =
           this.options.resolveProvider?.(lessonModel) ?? providerId;
@@ -1680,8 +1694,47 @@ export class Orchestrator {
       };
     }
 
-    const selectedModel = this.modelRouter.selectModel(resolvedTaskType, modelOverride);
-    const fallbackChain = this.modelRouter.getFallbackChain(selectedModel);
+    let selectedModel = this.modelRouter.selectModel(resolvedTaskType, modelOverride);
+    let fallbackChain = this.modelRouter.getFallbackChain(selectedModel);
+
+    // Trivial tasks (list files, read one email, etc.) are one-shot tool dispatches.
+    // Always prefer local Ollama (qwen3:14b) first to avoid burning cloud tokens
+    // — even for tool-requiring tasks. The intent-based tool filter in
+    // apps/desktop/main.js narrows the tool set to ~15 tools for folder-browse /
+    // inbox / calendar prompts, which qwen3:14b handles reliably. If qwen3
+    // returns with an empty tool trace on a tool-requiring task (hallucinated
+    // an answer instead of calling the tool), we treat it as a failure and
+    // fall through to the next model in the chain (see the trivial branch of
+    // the model loop below).
+    const trivialNeedsTools =
+      complexity === "trivial" &&
+      (promptLooksLikeFolderBrowse(prompt) ||
+        promptLooksLikeInboxRequest(prompt) ||
+        promptLooksLikeCalendarRequest(prompt));
+
+    // Models that cannot do client-side tool calls and must be dropped from
+    // the chain for tool-requiring tasks. `grok-4.20-multi-agent-0309` is
+    // gated behind beta access and 400s with "Client-side tools for multi-agent
+    // models require beta access" on standard xAI accounts.
+    const TOOL_INCAPABLE_MODELS = new Set(["grok-4.20-multi-agent-0309"]);
+    if (trivialNeedsTools) {
+      const before = fallbackChain.length;
+      fallbackChain = fallbackChain.filter((m) => !TOOL_INCAPABLE_MODELS.has(m));
+      if (TOOL_INCAPABLE_MODELS.has(selectedModel)) {
+        selectedModel = fallbackChain[0] ?? selectedModel;
+      }
+      if (fallbackChain.length < before) {
+        timeline.push({
+          stage: "shortcut",
+          detail: `Dropped tool-incapable models from chain (${before - fallbackChain.length}): grok-4.20-multi-agent-0309`
+        });
+      }
+    }
+
+    // No manual model preset. The activity profile + model router already
+    // pick the best model for the task type. Specialist agents get routed
+    // to the best provider per role via SPECIALIST_MODEL_MAP. If that fails,
+    // the fallback chain kicks in automatically.
 
     timeline.push({
       stage: "model",
@@ -1714,7 +1767,7 @@ export class Orchestrator {
         continue;
       }
 
-      emitStatus(`Using ${providerId} / ${candidateModel} for '${resolvedTaskType}' task...`);
+      emitStatus(`Working on this now...`);
       try {
         // ── Simple tasks: skip specialist agents, single model call ──
         if (complexity === "trivial") {
@@ -1729,12 +1782,35 @@ export class Orchestrator {
               { role: "user", content: enrichedPrompt }
             ],
             taskType: resolvedTaskType,
+            // Trivial one-shot tasks get ALL tools (no task-type preset filter) so the
+            // model can dispatch whichever tool fits, regardless of how we classified it.
+            // Intent-based tool scoping in invokeAgenticModel still narrows for folder-
+            // browse / inbox / calendar prompts.
+            skipToolFilter: true,
             taskContext
           });
           if (result.toolTrace?.length) {
             aggregateToolTrace.push(...result.toolTrace);
             aggregateToolActivity.push(...summarizeToolTrace(result.toolTrace));
           }
+
+          // Tool-trace verification. For trivial tasks that clearly require
+          // MCP tools (folder browse, inbox, calendar), a completion with an
+          // empty tool trace means the model hallucinated an answer instead
+          // of calling the tool — treat it as a failure and fall through to
+          // the next model in the chain.
+          const toolTraceEmpty = !(result.toolTrace?.length);
+          if (trivialNeedsTools && toolTraceEmpty) {
+            timeline.push({
+              stage: "fallback",
+              detail: `${candidateModel}: returned without calling any tool for a tool-requiring task — trying next model`
+            });
+            lastError = new Error(
+              `${candidateModel} completed without invoking any MCP tool for a folder/inbox/calendar query`
+            );
+            continue;
+          }
+
           timeline.push({ stage: "result", detail: `Completed with ${providerId} / ${candidateModel}` });
           return {
             taskType: resolvedTaskType,
@@ -1765,7 +1841,7 @@ export class Orchestrator {
           // Cross-provider routing disabled until tool format conversion is implemented
           // TODO: add tool format conversion per provider to enable full model council
 
-          emitStatus(`${activityProfile.label}: ${agentName} (${agentProvider}/${agentModel})...`);
+          emitStatus(`${agentName} is working on this...`);
           const phaseResult = await this.options.invokeModel({
             providerId: agentProvider,
             model: agentModel,
@@ -1813,7 +1889,7 @@ export class Orchestrator {
           }
         }
 
-        emitStatus(`${activityProfile.label}: Synthesizing (${providerId}/${candidateModel})...`);
+        emitStatus(`Pulling everything together now...`);
         const result = await this.options.invokeModel({
           providerId,
           model: candidateModel,
@@ -1877,7 +1953,7 @@ export class Orchestrator {
           stage: "fallback",
           detail: `${providerId}/${candidateModel}: ${reason}`
         });
-        emitStatus(`Routing: ${candidateModel} unavailable (${reason}) — trying next model...`);
+        emitStatus(`Switching to a different model...`);
       }
     }
 

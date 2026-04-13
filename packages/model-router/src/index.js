@@ -7,6 +7,7 @@ const DEFAULT_MODEL_PROFILES = getDefaultModelProfiles();
 // Single source of truth for the fallback chain. Ordered best-available →
 // cheaper cloud → different provider → local terminal fallback.
 const DEFAULT_FALLBACK_CHAIN = Object.freeze([
+  "gpt-5.4-pro",
   "gpt-5.4",
   "gpt-5.4-mini",
   "gemini-2.5-pro",
