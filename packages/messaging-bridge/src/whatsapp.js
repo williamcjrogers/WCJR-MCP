@@ -252,11 +252,20 @@ export function createWhatsAppChannel(options) {
      * @returns {{ status: number, body: object }}
      */
     handleWebhook(rawBody, body, signature) {
-      // HMAC verification — skip if no secret configured or if running locally
-      if (hmacSecret && signature) {
-        const valid = verifyHmac(typeof rawBody === "string" ? rawBody : rawBody.toString(), signature, hmacSecret);
-        if (!valid) {
-          console.warn("[whatsapp] HMAC mismatch — allowing anyway for local dev");
+      // HMAC verification.
+      // - No secret configured: accept (local dev / pre-production).
+      // - Secret configured + valid signature: accept.
+      // - Secret configured + missing/invalid signature: reject 401. Anyone who
+      //   can reach the webhook URL could otherwise inject arbitrary messages.
+      if (hmacSecret) {
+        if (!signature) {
+          console.warn("[whatsapp] missing x-webhook-hmac with secret configured; rejecting");
+          return { status: 401, body: { ok: false, error: "missing webhook signature" } };
+        }
+        const rawString = typeof rawBody === "string" ? rawBody : rawBody.toString();
+        if (!verifyHmac(rawString, signature, hmacSecret)) {
+          console.warn("[whatsapp] HMAC mismatch; rejecting webhook");
+          return { status: 401, body: { ok: false, error: "invalid webhook signature" } };
         }
       }
 
