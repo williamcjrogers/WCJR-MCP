@@ -62,6 +62,45 @@ function applyAmendments(phases, currentIndex, amendments) {
  *   cancelled: boolean
  * }>}
  */
+/**
+ * Build a compact snapshot of the prior phases this phase depends on (or all
+ * prior phases when dependsOn is empty). Keeps each phase summary short so the
+ * user prompt doesn't balloon; callers cap the combined block length.
+ */
+function buildPriorPhaseSnapshot(phase, ledger) {
+  if (!ledger?.phases?.length) return "";
+  const dependencies = Array.isArray(phase.dependsOn) && phase.dependsOn.length > 0
+    ? new Set(phase.dependsOn)
+    : null;
+  const relevant = ledger.phases.filter((prior) => {
+    if (!prior) return false;
+    if (prior.status === "running") return false;
+    if (dependencies) return dependencies.has(prior.id);
+    return true;
+  });
+  if (!relevant.length) return "";
+  const MAX_CONTENT_CHARS = 1500;
+  const entries = relevant.slice(-4).map((prior) => {
+    const content = String(prior.content ?? "").trim();
+    const snippet = content.length > MAX_CONTENT_CHARS
+      ? `${content.slice(0, MAX_CONTENT_CHARS)}\n…[truncated ${content.length - MAX_CONTENT_CHARS} chars]`
+      : content;
+    const artifacts = Array.isArray(prior.artifacts) && prior.artifacts.length
+      ? prior.artifacts.slice(0, 5).map((a) => `  - ${a.path} (${a.kind ?? "artifact"})`).join("\n")
+      : "";
+    return [
+      `## Phase ${prior.id} — status: ${prior.status}`,
+      prior.intent ? `Intent: ${prior.intent}` : "",
+      snippet ? `Output:\n${snippet}` : "",
+      artifacts ? `Artifacts:\n${artifacts}` : ""
+    ].filter(Boolean).join("\n");
+  });
+  return [
+    "PRIOR PHASES CONTEXT — use this to build on what earlier phases already produced. Do not repeat their work; extend or refine it.",
+    ...entries
+  ].join("\n\n");
+}
+
 async function runPhase(phase, ctx) {
   const {
     phases,
@@ -78,6 +117,7 @@ async function runPhase(phase, ctx) {
     maxCriticRounds,
     systemMessage,
     conversationMessages,
+    priorPhaseSnapshot,
     runId,
     batchIndex,
     batchSize,
@@ -125,7 +165,8 @@ async function runPhase(phase, ctx) {
     const retryNote = retryGuidance
       ? `\n\nIMPORTANT — RETRY GUIDANCE from the critic: ${retryGuidance}`
       : "";
-    const phasePrompt = `${phase.prompt}${retryNote}`;
+    const priorBlock = priorPhaseSnapshot ? `${priorPhaseSnapshot}\n\n---\n\n` : "";
+    const phasePrompt = `${priorBlock}${phase.prompt}${retryNote}`;
 
     let result;
     try {
@@ -373,6 +414,12 @@ export async function runIterativePlan({
 
     const batchPromises = batch.map((phase) => {
       totalPhasesExecuted += 1;
+      // Build the prior-phase snapshot once per phase from the current ledger.
+      // Phases in the same batch don't see each other (they run in parallel
+      // intentionally). Phases in later batches see the accumulated results
+      // of all previous batches — which is the whole point of a multi-phase
+      // plan.
+      const priorPhaseSnapshot = buildPriorPhaseSnapshot(phase, ledger);
       return runPhase(phase, {
         phases,
         phaseIndex: phases.indexOf(phase),
@@ -388,6 +435,7 @@ export async function runIterativePlan({
         maxCriticRounds,
         systemMessage,
         conversationMessages,
+        priorPhaseSnapshot,
         runId: plan.taskId ?? "adhoc",
         batchIndex,
         batchSize: batch.length,
