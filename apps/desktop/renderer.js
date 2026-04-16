@@ -1755,9 +1755,15 @@ function renderTaskList() {
       const meta = buildTaskListMeta(task);
       const updatedAt = task.updatedAt ? new Date(task.updatedAt).toLocaleString() : "";
       const statusClass = sanitizeCssToken(task.status, "unknown");
+      // Surface degraded completions (critic failed but the phase went
+      // through) so the operator can tell them apart from clean successes.
+      const degradedCount = Number(task.summary?.runLedger?.degradedPhases ?? 0);
+      const outcome = task.summary?.runLedger?.outcome;
+      const isDegraded = degradedCount > 0 || outcome === "completed_with_warnings";
       return `
         <button class="task-list-item ${task.id === selectedTaskId ? "active" : ""}" type="button" data-task-id="${escapeHtml(task.id)}">
           <span class="task-status ${statusClass}">${escapeHtml(task.status ?? "unknown")}</span>
+          ${isDegraded ? `<span class="task-status-degraded" title="${degradedCount} phase(s) accepted without a critic verdict">DEGRADED</span>` : ""}
           <span class="task-prompt-preview" title="${escapeHtml(title)}">${escapeHtml(title.slice(0, 72))}${title.length > 72 ? "…" : ""}</span>
           ${meta ? `<span class="task-list-submeta">${escapeHtml(meta)}</span>` : ""}
           <span class="task-meta">${escapeHtml(updatedAt)}</span>
@@ -3314,3 +3320,240 @@ if (els.btnDismissPlan) {
 
 syncBootstrapControls();
 refreshState();
+
+// ═══════════════════════════════════════════════════════════
+// Skills tab — browse / reload filesystem-backed SKILL.md files.
+// The IPC (assistant:getSkills / getSkill / reloadSkills) was wired in
+// main.js. This block is pure UI.
+// ═══════════════════════════════════════════════════════════
+const skillsTabEls = {
+  list: document.getElementById("skills-list"),
+  detail: document.getElementById("skills-detail"),
+  reload: document.getElementById("btn-skills-reload"),
+  tabBtn: document.querySelector('.tab-btn[data-tab="skills"]')
+};
+
+let skillsTabState = {
+  loaded: false,
+  loading: false,
+  skills: [],
+  activeId: null
+};
+
+function formatSkillTriggers(triggers) {
+  const list = Array.isArray(triggers) ? triggers.filter(Boolean) : [];
+  if (!list.length) return "";
+  return `Triggers: ${list.join(", ")}`;
+}
+
+function renderSkillsList() {
+  if (!skillsTabEls.list) return;
+  if (skillsTabState.loading) {
+    skillsTabEls.list.innerHTML = '<p class="hint">Loading skills…</p>';
+    return;
+  }
+  if (!skillsTabState.skills.length) {
+    skillsTabEls.list.innerHTML = `
+      <p class="hint">No skills installed. Drop a SKILL.md into the bundled <code>skills/</code> folder or into <code>%APPDATA%\\WCJR Assistant\\skills\\</code> and click Reload.</p>`;
+    return;
+  }
+  skillsTabEls.list.innerHTML = "";
+  for (const skill of skillsTabState.skills) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "skill-card";
+    card.dataset.skillId = skill.id;
+    if (skill.id === skillsTabState.activeId) card.classList.add("active");
+    card.innerHTML = `
+      <div class="skill-name"></div>
+      <div class="skill-triggers"></div>
+    `;
+    card.querySelector(".skill-name").textContent = skill.name;
+    card.querySelector(".skill-triggers").textContent =
+      formatSkillTriggers(skill.triggers) || skill.description.slice(0, 80);
+    card.addEventListener("click", () => {
+      skillsTabState.activeId = skill.id;
+      renderSkillsList();
+      loadSkillDetail(skill.id);
+    });
+    skillsTabEls.list.appendChild(card);
+  }
+}
+
+function renderSkillDetail(skill) {
+  if (!skillsTabEls.detail) return;
+  if (!skill) {
+    skillsTabEls.detail.innerHTML =
+      '<p class="hint">Select a skill on the left to see its full SKILL.md body.</p>';
+    return;
+  }
+  const chips = [];
+  if (skill.version) chips.push(`v${skill.version}`);
+  if (skill.internalOnly) chips.push("internal");
+  if (Array.isArray(skill.tags)) {
+    for (const tag of skill.tags) chips.push(`#${tag}`);
+  }
+  skillsTabEls.detail.innerHTML = `
+    <h3></h3>
+    <p class="hint skill-description"></p>
+    <div class="skill-meta"></div>
+    <div class="skill-triggers hint"></div>
+    <pre class="skill-body"></pre>
+    <p class="hint skill-source"></p>
+  `;
+  skillsTabEls.detail.querySelector("h3").textContent = skill.name;
+  skillsTabEls.detail.querySelector(".skill-description").textContent = skill.description;
+  const metaEl = skillsTabEls.detail.querySelector(".skill-meta");
+  for (const chip of chips) {
+    const span = document.createElement("span");
+    span.className = "skill-chip";
+    span.textContent = chip;
+    metaEl.appendChild(span);
+  }
+  skillsTabEls.detail.querySelector(".skill-triggers").textContent =
+    formatSkillTriggers(skill.triggers) || "";
+  skillsTabEls.detail.querySelector(".skill-body").textContent = skill.body ?? "";
+  const sourceEl = skillsTabEls.detail.querySelector(".skill-source");
+  sourceEl.textContent = skill.sourcePath ? `Loaded from ${skill.sourcePath}` : "";
+}
+
+async function loadSkillsTab({ force = false } = {}) {
+  if (!api?.getSkills || !skillsTabEls.list) return;
+  if (skillsTabState.loading) return;
+  if (skillsTabState.loaded && !force) return;
+  skillsTabState.loading = true;
+  renderSkillsList();
+  try {
+    const skills = await api.getSkills({ includeInternal: false });
+    skillsTabState.skills = Array.isArray(skills) ? skills : [];
+    skillsTabState.loaded = true;
+    skillsTabState.loading = false;
+    if (!skillsTabState.skills.some((s) => s.id === skillsTabState.activeId)) {
+      skillsTabState.activeId = skillsTabState.skills[0]?.id ?? null;
+    }
+    renderSkillsList();
+    if (skillsTabState.activeId) {
+      await loadSkillDetail(skillsTabState.activeId);
+    } else {
+      renderSkillDetail(null);
+    }
+  } catch (err) {
+    skillsTabState.loading = false;
+    skillsTabEls.list.innerHTML = `<p class="hint">Failed to load skills: ${err?.message ?? err}</p>`;
+  }
+}
+
+async function loadSkillDetail(skillId) {
+  if (!api?.getSkill || !skillsTabEls.detail) return;
+  try {
+    const full = await api.getSkill(skillId);
+    renderSkillDetail(full);
+  } catch (err) {
+    skillsTabEls.detail.innerHTML = `<p class="hint">Failed to load ${skillId}: ${err?.message ?? err}</p>`;
+  }
+}
+
+if (skillsTabEls.reload) {
+  skillsTabEls.reload.addEventListener("click", async () => {
+    if (!api?.reloadSkills) return;
+    skillsTabEls.reload.disabled = true;
+    try {
+      await api.reloadSkills();
+    } finally {
+      skillsTabEls.reload.disabled = false;
+      await loadSkillsTab({ force: true });
+    }
+  });
+}
+
+if (skillsTabEls.tabBtn) {
+  skillsTabEls.tabBtn.addEventListener("click", () => {
+    loadSkillsTab();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Logs tab — tail the structured JSONL written by @wcjr/logger.
+// ═══════════════════════════════════════════════════════════
+const logsTabEls = {
+  output: document.getElementById("logs-output"),
+  meta: document.getElementById("logs-meta"),
+  levelFilter: document.getElementById("logs-level-filter"),
+  moduleFilter: document.getElementById("logs-module-filter"),
+  refresh: document.getElementById("btn-logs-refresh"),
+  tabBtn: document.querySelector('.tab-btn[data-tab="logs"]')
+};
+
+const LOG_LEVEL_ORDER = { trace: 10, debug: 20, info: 30, warn: 40, error: 50, fatal: 60 };
+
+function renderLogLines(records) {
+  if (!logsTabEls.output) return;
+  if (!records.length) {
+    logsTabEls.output.textContent = "(no matching log lines)";
+    return;
+  }
+  logsTabEls.output.innerHTML = "";
+  for (const record of records) {
+    const row = document.createElement("div");
+    row.className = `log-line ${record.level ?? "info"}`;
+    const time = document.createElement("span");
+    time.className = "log-time";
+    time.textContent = record.time ?? "";
+    const level = document.createElement("span");
+    level.className = "log-level";
+    level.textContent = (record.level ?? "info").toUpperCase().padEnd(5);
+    const module = document.createElement("span");
+    module.className = "log-module";
+    module.textContent = record.module ? `[${record.module}]` : "";
+    const msg = document.createElement("span");
+    msg.className = "log-msg";
+    const extras = Object.entries(record)
+      .filter(([k]) => !["time", "level", "module", "msg"].includes(k))
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(" ");
+    msg.textContent = ` ${record.msg ?? ""}${extras ? ` ${extras}` : ""}`;
+    row.append(time, document.createTextNode(" "), level, module, msg);
+    logsTabEls.output.appendChild(row);
+  }
+}
+
+async function loadLogsTab() {
+  if (!api?.getLogs || !logsTabEls.output) return;
+  logsTabEls.output.textContent = "Loading…";
+  const level = logsTabEls.levelFilter?.value ?? "info";
+  const moduleFilter = (logsTabEls.moduleFilter?.value ?? "").trim().toLowerCase();
+  try {
+    const result = await api.getLogs({ limit: 400 });
+    const threshold = LOG_LEVEL_ORDER[level] ?? LOG_LEVEL_ORDER.info;
+    const filtered = (result?.lines ?? []).filter((record) => {
+      const recordLevel = LOG_LEVEL_ORDER[record.level] ?? LOG_LEVEL_ORDER.info;
+      if (recordLevel < threshold) return false;
+      if (moduleFilter && !(record.module ?? "").toLowerCase().includes(moduleFilter)) {
+        return false;
+      }
+      return true;
+    });
+    renderLogLines(filtered.reverse()); // most recent first
+    if (logsTabEls.meta) {
+      logsTabEls.meta.textContent = `${filtered.length} of ${result?.total ?? 0} entries · ${result?.file ?? ""}`;
+    }
+  } catch (err) {
+    logsTabEls.output.textContent = `Failed to load logs: ${err?.message ?? err}`;
+  }
+}
+
+if (logsTabEls.refresh) {
+  logsTabEls.refresh.addEventListener("click", () => loadLogsTab());
+}
+if (logsTabEls.levelFilter) {
+  logsTabEls.levelFilter.addEventListener("change", () => loadLogsTab());
+}
+if (logsTabEls.moduleFilter) {
+  logsTabEls.moduleFilter.addEventListener("input", () => {
+    clearTimeout(logsTabEls.moduleFilter._debounce);
+    logsTabEls.moduleFilter._debounce = setTimeout(() => loadLogsTab(), 250);
+  });
+}
+if (logsTabEls.tabBtn) {
+  logsTabEls.tabBtn.addEventListener("click", () => loadLogsTab());
+}

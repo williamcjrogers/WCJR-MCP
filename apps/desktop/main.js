@@ -3824,6 +3824,37 @@ function registerIpcHandlers() {
     return { count: summary.count, diagnostics: summary.diagnostics ?? [] };
   });
 
+  ipcMain.handle("assistant:getLogs", async (_event, options = {}) => {
+    const limit = Number.isFinite(options?.limit) ? Math.max(10, Math.min(2000, options.limit)) : 400;
+    const logsDir = path.join(app.getPath("userData"), "logs");
+    // Pick today's log by default. Could be extended to accept a date in
+    // future, but 99% of diagnostic traffic wants the current session.
+    const now = new Date();
+    const yyyy = now.getUTCFullYear();
+    const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(now.getUTCDate()).padStart(2, "0");
+    const file = path.join(logsDir, `wcjr-${yyyy}-${mm}-${dd}.jsonl`);
+    let raw = "";
+    try {
+      raw = await fs.readFile(file, "utf-8");
+    } catch {
+      return { file, total: 0, lines: [] };
+    }
+    const rawLines = raw.split(/\r?\n/).filter(Boolean);
+    // Parse only the last `limit` entries — the file can grow large over the
+    // day but the UI only ever shows the tail.
+    const startIndex = Math.max(0, rawLines.length - limit);
+    const parsed = [];
+    for (let i = startIndex; i < rawLines.length; i += 1) {
+      try {
+        parsed.push(JSON.parse(rawLines[i]));
+      } catch {
+        parsed.push({ time: "", level: "error", module: "log-parse", msg: rawLines[i] });
+      }
+    }
+    return { file, total: rawLines.length, lines: parsed };
+  });
+
   ipcMain.handle("assistant:getPolicy", async () => {
     const engine = getPolicyEngine();
     return {

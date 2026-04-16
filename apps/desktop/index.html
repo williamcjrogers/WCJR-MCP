@@ -33,6 +33,8 @@
           <button class="tab-btn" data-tab="activity" role="tab" aria-selected="false">Activity</button>
           <button class="tab-btn" data-tab="providers" role="tab" aria-selected="false">Providers</button>
           <button class="tab-btn" data-tab="tools" role="tab" aria-selected="false">Tools</button>
+          <button class="tab-btn" data-tab="skills" role="tab" aria-selected="false">Skills</button>
+          <button class="tab-btn" data-tab="logs" role="tab" aria-selected="false">Logs</button>
           <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false">Settings</button>
         </nav>
 
@@ -415,6 +417,62 @@
             <p class="hint">All registered servers. Enable, configure credentials, then Connect All Tools.</p>
           </div>
           <div id="mcp-server-list" class="server-list"></div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           TAB: SKILLS
+           ═══════════════════════════════════════════════════════════ -->
+      <div class="tab-view" data-tab-view="skills">
+        <div class="tab-view-header">
+          <h2>Skills</h2>
+          <p class="hint">Reusable operating disciplines. Each skill is a SKILL.md dropped into the bundled <code>skills/</code> folder or <code>%APPDATA%\WCJR Assistant\skills\</code>. Triggers listed below can also be invoked as slash commands in chat.</p>
+        </div>
+        <div class="tab-view-body">
+          <div class="skills-layout">
+            <section class="skills-list-panel">
+              <div class="skills-list-header">
+                <h3>Installed skills</h3>
+                <button id="btn-skills-reload" type="button" class="btn secondary">Reload</button>
+              </div>
+              <div id="skills-list" class="skills-list" role="list">
+                <p class="hint">Loading skills…</p>
+              </div>
+            </section>
+            <section class="skills-detail-panel">
+              <div id="skills-detail" class="skills-detail">
+                <p class="hint">Select a skill on the left to see its full SKILL.md body.</p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════════
+           TAB: LOGS
+           ═══════════════════════════════════════════════════════════ -->
+      <div class="tab-view" data-tab-view="logs">
+        <div class="tab-view-header">
+          <h2>Logs</h2>
+          <p class="hint">Structured JSONL log at <code>%APPDATA%\WCJR Assistant\logs\wcjr-YYYY-MM-DD.jsonl</code>. Most recent entries first.</p>
+        </div>
+        <div class="tab-view-body">
+          <div class="logs-toolbar">
+            <label class="row">
+              <span>Level</span>
+              <select id="logs-level-filter" class="profile-select">
+                <option value="trace">trace+</option>
+                <option value="debug">debug+</option>
+                <option value="info" selected>info+</option>
+                <option value="warn">warn+</option>
+                <option value="error">error+</option>
+              </select>
+            </label>
+            <input id="logs-module-filter" class="text-input" type="text" placeholder="Filter by module (e.g. orchestrator)" />
+            <button id="btn-logs-refresh" type="button" class="btn secondary">Refresh</button>
+            <span id="logs-meta" class="hint"></span>
+          </div>
+          <pre id="logs-output" class="logs-output" role="log" aria-live="polite">Loading…</pre>
         </div>
       </div>
 

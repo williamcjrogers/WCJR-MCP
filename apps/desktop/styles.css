@@ -1715,3 +1715,187 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
   color: var(--muted);
   font-style: italic;
 }
+
+
+/* ═══════════════════════════════════════════════════════════
+   Skills panel
+   ═══════════════════════════════════════════════════════════ */
+.skills-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) 1fr;
+  gap: 16px;
+  min-height: 420px;
+}
+
+.skills-list-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--panel);
+}
+
+.skills-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.skills-list-header h3 {
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin: 0;
+}
+
+.skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 540px;
+  overflow-y: auto;
+}
+
+.skill-card {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px 10px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--fg);
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.skill-card:hover {
+  border-color: var(--accent);
+}
+
+.skill-card.active {
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.skill-card .skill-name {
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+
+.skill-card .skill-triggers {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.skills-detail-panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  background: var(--panel);
+  overflow-y: auto;
+  max-height: 640px;
+}
+
+.skills-detail h3 {
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin: 0 0 8px;
+}
+
+.skills-detail .skill-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.skills-detail .skill-chip {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.skills-detail pre.skill-body {
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 12px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Logs viewer
+   ═══════════════════════════════════════════════════════════ */
+.logs-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.logs-toolbar .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.logs-output {
+  font-family: ui-monospace, Consolas, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 10px 12px;
+  max-height: 620px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+  margin: 0;
+}
+
+.log-line {
+  display: block;
+}
+
+.log-line .log-level {
+  font-weight: 700;
+  padding-right: 8px;
+}
+
+.log-line.warn .log-level { color: #f6c160; }
+.log-line.error .log-level,
+.log-line.fatal .log-level { color: #ff6b6b; }
+.log-line.info .log-level { color: #8ea9ff; }
+.log-line.debug .log-level { color: var(--muted); }
+
+/* ═══════════════════════════════════════════════════════════
+   Degraded run badge on task items
+   ═══════════════════════════════════════════════════════════ */
+.task-status-degraded {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f6c160;
+  border: 1px solid rgba(246, 193, 96, 0.4);
+  border-radius: 3px;
+  background: rgba(246, 193, 96, 0.08);
+}
