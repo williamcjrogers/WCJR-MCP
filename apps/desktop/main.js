@@ -2454,7 +2454,29 @@ function createWindow() {
       sandbox: true
     }
   });
-  mainWindow.webContents.openDevTools();
+  // Keep DevTools closed in packaged builds. Set WCJR_DEBUG=1 to force open
+  // (useful for troubleshooting a shipped build). In dev we still auto-open.
+  if (!app.isPackaged || process.env.WCJR_DEBUG === "1") {
+    mainWindow.webContents.openDevTools();
+  }
+
+  // One-shot warning when local encryption isn't available — keys and the
+  // Telegram bot token get written in plaintext in that case and the user
+  // deserves to know. This pings the renderer after it loads.
+  mainWindow.webContents.once("did-finish-load", () => {
+    if (!isLocalEncryptionAvailable()) {
+      try {
+        mainWindow.webContents.send("assistant:streamChunk", {
+          type: "status",
+          variant: "warning",
+          text: "Secret storage is unavailable on this OS install. API keys and the messaging bot token will be saved in plaintext in assistant-config.json. Consider running on a platform where Electron safeStorage works, or avoid saving secrets."
+        });
+      } catch {
+        // best effort — renderer may not be ready
+      }
+      logStartup("safeStorage unavailable; keys stored in plaintext");
+    }
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) {
       shell.openExternal(url).catch(() => {});
