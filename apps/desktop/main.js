@@ -24,8 +24,7 @@ import { PolicyEngine, POLICY_PROFILES, ACTION_TYPES } from "@wcjr/policy-engine
 import { createChannel } from "@wcjr/messaging-bridge";
 import {
   clearToolNameRegistry,
-  mcpToolsToGeminiFunctions,
-  mcpToolsToOpenAIFunctions,
+  mcpToolsToProvider,
   runToolLoop
 } from "@wcjr/tool-loop";
 import { buildTelegramManagerFallback, buildTelegramManagerText } from "./telegram-manager.js";
@@ -2304,10 +2303,7 @@ async function invokeAgenticModel({
   }
 
   clearToolNameRegistry();
-  const rawTools =
-    providerId === "gemini"
-      ? mcpToolsToGeminiFunctions(filteredToolSummary)
-      : mcpToolsToOpenAIFunctions(filteredToolSummary);
+  const rawTools = mcpToolsToProvider(providerId, filteredToolSummary);
   const tools = capToolsForOpenAI(rawTools, providerId);
 
   if (!tools.length) {

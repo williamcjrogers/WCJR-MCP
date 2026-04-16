@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  mcpToolsToAnthropicTools,
   mcpToolsToGeminiFunctions,
   mcpToolsToOpenAIFunctions,
+  mcpToolsToProvider,
   parseToolCallName,
   runToolLoop,
   serializeToolResult
@@ -45,6 +47,62 @@ test("tool schema conversion preserves compatibility metadata", () => {
     server: "Local Filesystem",
     tool: "read_text_file"
   });
+});
+
+test("mcpToolsToAnthropicTools emits flat Anthropic tool shape", () => {
+  const toolSummary = [
+    {
+      server: "Local Filesystem",
+      toolDetails: [
+        {
+          name: "read_text_file",
+          description: "Read a text file",
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"]
+          }
+        }
+      ]
+    }
+  ];
+
+  const anthropicTools = mcpToolsToAnthropicTools(toolSummary);
+  assert.equal(anthropicTools.length, 1);
+  assert.equal(typeof anthropicTools[0].name, "string");
+  assert.ok(anthropicTools[0].description.startsWith("Read a text file"));
+  assert.equal(anthropicTools[0].input_schema.type, "object");
+  assert.deepEqual(anthropicTools[0].input_schema.required, ["path"]);
+  // No wrapper fields from the OpenAI shape.
+  assert.equal(anthropicTools[0].type, undefined);
+  assert.equal(anthropicTools[0].function, undefined);
+});
+
+test("mcpToolsToProvider dispatches to the right shape per providerId", () => {
+  const toolSummary = [
+    {
+      server: "Fs",
+      toolDetails: [
+        {
+          name: "list_directory",
+          description: "List files",
+          inputSchema: { type: "object", properties: {} }
+        }
+      ]
+    }
+  ];
+
+  const openaiTools = mcpToolsToProvider("openai", toolSummary);
+  const geminiTools = mcpToolsToProvider("gemini", toolSummary);
+  const anthropicTools = mcpToolsToProvider("anthropic", toolSummary);
+  const defaultTools = mcpToolsToProvider("something-new", toolSummary);
+
+  assert.equal(openaiTools[0].type, "function");
+  assert.equal(geminiTools[0].type, undefined);
+  assert.ok(geminiTools[0].parameters);
+  assert.equal(anthropicTools[0].input_schema.type, "object");
+  // Unknown provider falls back to the OpenAI chat-completions shape.
+  assert.equal(defaultTools[0].type, "function");
 });
 
 test("serializeToolResult guards and truncates tool output", () => {

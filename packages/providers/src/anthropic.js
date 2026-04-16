@@ -93,12 +93,27 @@ export async function stream({ apiKey, model, messages, tools, onChunk, signal }
         budget_tokens: 32000
       }
     } : {}),
+    // Tools are expected in Anthropic flat shape — emit via
+    // `mcpToolsToAnthropicTools` from `@wcjr/tool-loop`, NOT the OpenAI
+    // `{type:"function",function:{...}}` wrapper. Legacy callers that still
+    // pass the wrapper are unwrapped here so the request does not 400; a
+    // warning highlights the misuse during the migration.
     ...(tools?.length ? {
-      tools: tools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        input_schema: t.parameters ?? t.parametersJsonSchema ?? { type: "object", properties: {} }
-      }))
+      tools: tools.map((t) => {
+        if (t?.type === "function" && t.function) {
+          console.warn("[anthropic] received OpenAI-wrapped tool; unwrap in caller and use mcpToolsToAnthropicTools.");
+          return {
+            name: t.function.name,
+            description: t.function.description ?? "",
+            input_schema: t.function.parameters ?? { type: "object", properties: {} }
+          };
+        }
+        return {
+          name: t.name,
+          description: t.description ?? "",
+          input_schema: t.input_schema ?? t.parameters ?? t.parametersJsonSchema ?? { type: "object", properties: {} }
+        };
+      })
     } : {})
   };
 

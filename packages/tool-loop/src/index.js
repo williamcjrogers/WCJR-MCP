@@ -426,6 +426,27 @@ export function mcpToolsToGeminiFunctions(toolSummary = []) {
   }));
 }
 
+export function mcpToolsToAnthropicTools(toolSummary = []) {
+  return normalizeToolSummary(toolSummary).map((entry) => ({
+    name: registerToolName(entry.server, entry.tool),
+    description: ensureFunctionDescription(entry.server, entry.tool, entry.description),
+    input_schema: sanitizeToolParameters(entry.inputSchema)
+  }));
+}
+
+/**
+ * Convert an MCP tool summary into the exact shape each provider expects.
+ * Callers should pass the resolved providerId (`"openai"`, `"openai-responses"`,
+ * `"anthropic"`, `"gemini"`, `"grok"`, `"ollama"`, `"perplexity"`). Any unknown
+ * providerId falls back to the OpenAI chat-completions shape, which every
+ * OpenAI-compatible backend accepts.
+ */
+export function mcpToolsToProvider(providerId, toolSummary = []) {
+  if (providerId === "gemini") return mcpToolsToGeminiFunctions(toolSummary);
+  if (providerId === "anthropic") return mcpToolsToAnthropicTools(toolSummary);
+  return mcpToolsToOpenAIFunctions(toolSummary);
+}
+
 export async function runToolLoop({
   adapter,
   adapterArgs,
