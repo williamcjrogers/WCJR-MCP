@@ -28,6 +28,7 @@ import {
   runToolLoop
 } from "@wcjr/tool-loop";
 import { loadSkills, getSkill, listSkills, findSkillByTrigger } from "@wcjr/skills";
+import { configureLogger, createLogger } from "@wcjr/logger";
 import { buildTelegramManagerFallback, buildTelegramManagerText } from "./telegram-manager.js";
 import {
   buildBootstrapState,
@@ -186,6 +187,12 @@ const startupLogPath = path.join(
   "wcjr-operator-startup.log"
 );
 
+// Structured logger — writes JSONL to <userData>/logs/wcjr-YYYY-MM-DD.jsonl
+// plus a mirrored human-readable line to stderr. The log dir is set via
+// configureLogger once app.whenReady lands; everything emitted before then
+// falls through to the console-only path below.
+const log = createLogger("main");
+
 if (!gotSingleInstanceLock) {
   app.quit();
 }
@@ -222,6 +229,10 @@ function configPath() {
 }
 
 function logStartup(message, error) {
+  // Keep the legacy TEMP/wcjr-operator-startup.log behaviour for backward
+  // compatibility (support traffic still copies from it) plus emit a
+  // structured log record with the same payload so the daily JSONL captures
+  // everything.
   const detail = error
     ? `${message}\n${error.stack ?? error.message ?? String(error)}`
     : message;
@@ -230,6 +241,11 @@ function logStartup(message, error) {
     fsSync.appendFileSync(startupLogPath, line, "utf-8");
   } catch {
     // Ignore logging failures.
+  }
+  if (error) {
+    log.error(message, { err: error?.message ?? String(error), stack: error?.stack });
+  } else {
+    log.info(message);
   }
 }
 
@@ -4444,6 +4460,14 @@ if (gotSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    // Point the structured logger at the user data dir. Separate from the
+    // legacy startup log path so we can wipe the old debugging file without
+    // losing audit history.
+    configureLogger({
+      logDir: path.join(app.getPath("userData"), "logs"),
+      minLevel: process.env.WCJR_LOG_LEVEL ?? (app.isPackaged ? "info" : "debug"),
+      mirrorToConsole: true
+    });
     logStartup("App ready");
     appConfig = await loadConfig();
     await migrateMailCalendarConfig();

@@ -21,6 +21,7 @@
     "@wcjr/document-ops": "0.1.0",
     "@wcjr/file-ops": "0.1.0",
     "@wcjr/filesystem-mcp": "0.1.0",
+    "@wcjr/logger": "0.1.0",
     "@wcjr/mail-calendar": "0.1.0",
     "@wcjr/memory-mcp": "0.1.0",
     "@wcjr/memory-store": "0.1.0",
