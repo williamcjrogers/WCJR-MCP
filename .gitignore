@@ -1,25 +1,20 @@
 node_modules/
 dist/
 build/
+
+# electron-builder output — every variant lives under a top-level release*/ dir.
 release/
-release-fresh/
-release-fresh2/
-release-fresh3/
-release-fresh4/
-release-fresh5/
-release-fresh6/
-release-fresh7/
-release-fresh8/
-release-fresh9/
-release-fresh10/
-release-fresh11/
-release-fresh12/
-release-fresh13/
-release-msal-fix/
-release-rebuild/
-release-rebuild-telegram/
+release-*/
 tmp-electron-probe/
+
+# Runtime artefacts we don't track.
 logs/
 *.log
 .env
 .env.local
+.claude/
+
+# OCR blobs + WAHA QR snapshots belong in tmp/ — we deliberately do not
+# commit them.
+eng.traineddata
+waha-qr*.png
