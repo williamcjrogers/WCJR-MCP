@@ -1896,16 +1896,26 @@ export class Orchestrator {
         // ── Standard/complex tasks: full specialist agent chain ──
         const specialistOutputs = [];
         for (const agentName of specialistAgents.slice(0, -1)) {
-          // Model council: pick best provider ONLY for non-tool agents (suppressStream: true skips tools)
+          // Model council. Tool-format conversion is now unified behind
+          // mcpToolsToProvider so cross-provider routing is safe: we just
+          // need the target provider to resolve, to have an API key, and
+          // to be distinct from the current one (otherwise we already are
+          // on the best model).
           const council = SPECIALIST_MODEL_MAP[agentName];
           let agentProvider = providerId;
           let agentModel = candidateModel;
-          if (council && council.provider === providerId) {
-            // Same provider — safe to use council model
-            agentModel = council.model;
+          if (council) {
+            const councilProvider = council.provider;
+            const councilHasKey =
+              councilProvider === "ollama" ||
+              (this.options.hasApiKeySync?.(councilProvider) === true);
+            if (councilHasKey) {
+              agentProvider = councilProvider;
+              agentModel = council.model;
+            } else if (council.provider === providerId) {
+              agentModel = council.model;
+            }
           }
-          // Cross-provider routing disabled until tool format conversion is implemented
-          // TODO: add tool format conversion per provider to enable full model council
 
           emitStatus(`${agentName} is working on this...`);
           const phaseResult = await this.options.invokeModel({
