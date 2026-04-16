@@ -32,6 +32,7 @@
     "@wcjr/providers": "0.1.0",
     "@wcjr/qdrant-rag-mcp": "0.1.0",
     "@wcjr/rag": "0.1.0",
+    "@wcjr/skills": "0.1.0",
     "@wcjr/task-store": "0.1.0",
     "@wcjr/xlsx-engine-mcp": "0.1.0",
     "@qdrant/js-client-rest": "^1.17.0",
