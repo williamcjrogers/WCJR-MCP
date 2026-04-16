@@ -6,6 +6,20 @@ const DEFAULT_SESSION = {
   updatedAt: null
 };
 
+async function writeFileAtomic(storagePath, contents) {
+  const { writeFile, rename, mkdir, unlink } = await import("node:fs/promises");
+  const dir = storagePath.replace(/[/\\][^/\\]+$/, "");
+  await mkdir(dir, { recursive: true });
+  const tmpPath = `${storagePath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    await writeFile(tmpPath, contents, "utf-8");
+    await rename(tmpPath, storagePath);
+  } catch (err) {
+    try { await unlink(tmpPath); } catch {}
+    throw err;
+  }
+}
+
 function createId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -149,13 +163,8 @@ export class ConversationStore {
       .catch(() => undefined)
       .then(async () => {
         try {
-          const { writeFile, mkdir } = await import("node:fs/promises");
-          const dir = this.storagePath.replace(/[/\\][^/\\]+$/, "");
-          await mkdir(dir, { recursive: true });
-          const data = {
-            sessions: [...this.sessions.values()]
-          };
-          await writeFile(this.storagePath, JSON.stringify(data, null, 2), "utf-8");
+          const data = { sessions: [...this.sessions.values()] };
+          await writeFileAtomic(this.storagePath, JSON.stringify(data, null, 2));
         } catch (error) {
           console.error("[ConversationStore] save failed:", error.message);
         }

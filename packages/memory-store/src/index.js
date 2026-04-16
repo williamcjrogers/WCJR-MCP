@@ -10,6 +10,28 @@ const DEFAULT_MEMORY = {
   lastUsedAt: null
 };
 
+/**
+ * Write a JSON blob atomically. A mid-write crash leaves the existing file
+ * intact because we write to a sibling `.tmp` and rename into place. Rename
+ * is atomic on every supported platform (NTFS, APFS, ext4, Btrfs) when the
+ * source and target are on the same filesystem, which is always the case
+ * here.
+ */
+async function writeFileAtomic(storagePath, contents) {
+  const { writeFile, rename, mkdir, unlink } = await import("node:fs/promises");
+  const dir = storagePath.replace(/[/\\][^/\\]+$/, "");
+  await mkdir(dir, { recursive: true });
+  const tmpPath = `${storagePath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    await writeFile(tmpPath, contents, "utf-8");
+    await rename(tmpPath, storagePath);
+  } catch (err) {
+    // Best-effort cleanup so we don't leak tmp files on repeated failures.
+    try { await unlink(tmpPath); } catch {}
+    throw err;
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -143,11 +165,27 @@ export class MemoryStore {
 
   prune() {
     if (this.memories.size <= this.maxMemories) return;
-    const sorted = [...this.memories.entries()].sort(
-      (a, b) => new Date(a[1].updatedAt) - new Date(b[1].updatedAt)
-    );
-    for (const [id] of sorted.slice(0, this.memories.size - this.maxMemories)) {
+    // Pinned entries are sticky — they must not be evicted by churn. Sort the
+    // *unpinned* entries oldest-first and drop them until we're back under
+    // the cap. If pinned entries alone exceed the cap we leave them in place
+    // and log a one-line warning.
+    const all = [...this.memories.entries()];
+    const unpinned = all
+      .filter(([, memory]) => !memory.pinned)
+      .sort(
+        (a, b) =>
+          new Date(a[1].updatedAt ?? 0) - new Date(b[1].updatedAt ?? 0)
+      );
+    let overflow = this.memories.size - this.maxMemories;
+    for (const [id] of unpinned) {
+      if (overflow <= 0) break;
       this.memories.delete(id);
+      overflow -= 1;
+    }
+    if (overflow > 0) {
+      console.warn(
+        `[MemoryStore] ${overflow} pinned memories kept beyond maxMemories (${this.maxMemories}).`
+      );
     }
   }
 
@@ -169,13 +207,9 @@ export class MemoryStore {
       .catch(() => undefined)
       .then(async () => {
         try {
-          const { writeFile, mkdir } = await import("node:fs/promises");
-          const dir = this.storagePath.replace(/[/\\][^/\\]+$/, "");
-          await mkdir(dir, { recursive: true });
-          await writeFile(
+          await writeFileAtomic(
             this.storagePath,
-            JSON.stringify({ memories: [...this.memories.values()] }, null, 2),
-            "utf-8"
+            JSON.stringify({ memories: [...this.memories.values()] }, null, 2)
           );
         } catch (error) {
           console.error("[MemoryStore] save failed:", error.message);
