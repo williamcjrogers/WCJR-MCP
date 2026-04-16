@@ -952,6 +952,41 @@ export class Orchestrator {
     return this.mcpHub.connectAll();
   }
 
+  /**
+   * Fire-and-forget lesson writer for direct-mode runs. Mirrors the iterative
+   * branch's lesson write so both code paths contribute to the long-term
+   * memory store, not just iterative. Swallows errors inside the helper.
+   */
+  _writeDirectModeLesson({
+    resolvedTaskType,
+    prompt,
+    outcome,
+    selectedModel,
+    providerId,
+    criticModelId,
+    toolTrace,
+    artifacts
+  }) {
+    if (!this.options.memoryStore || !this.options.invokeModel) return;
+    const lessonModel = criticModelId ?? selectedModel;
+    const lessonProvider = this.options.resolveProvider?.(lessonModel) ?? providerId;
+    void generateAndWriteLesson({
+      invokeModel: this.options.invokeModel,
+      lessonModel,
+      lessonProvider,
+      memoryStore: this.options.memoryStore,
+      taskType: resolvedTaskType,
+      originalGoal: prompt,
+      outcome,
+      toolsUsed: Array.isArray(toolTrace) ? toolTrace.map((t) => t?.tool).filter(Boolean) : [],
+      criticVerdicts: [],
+      planSummary: "direct",
+      artifacts: artifacts ?? []
+    }).catch((err) => {
+      console.warn("[orchestrator] direct-mode lesson write failed:", err?.message ?? err);
+    });
+  }
+
   getTaskTypes() {
     return TASK_TYPES;
   }
@@ -1818,6 +1853,19 @@ export class Orchestrator {
           }
 
           timeline.push({ stage: "result", detail: `Completed with ${providerId} / ${candidateModel}` });
+          // Fire-and-forget lesson write for direct-mode trivial runs so the
+          // memory store grows with every successful run, not just iterative
+          // ones. Failures are swallowed inside the helper.
+          this._writeDirectModeLesson({
+            resolvedTaskType,
+            prompt,
+            outcome: "success",
+            selectedModel: candidateModel,
+            providerId,
+            criticModelId: null,
+            toolTrace: aggregateToolTrace,
+            artifacts: []
+          });
           return {
             taskType: resolvedTaskType,
             model: candidateModel,
@@ -1938,6 +1986,16 @@ export class Orchestrator {
           taskContext.onAudit("direct_completed", { model: candidateModel, provider: providerId });
         }
 
+        this._writeDirectModeLesson({
+          resolvedTaskType,
+          prompt,
+          outcome: "success",
+          selectedModel: candidateModel,
+          providerId,
+          criticModelId: null,
+          toolTrace: aggregateToolTrace,
+          artifacts: []
+        });
         return {
           taskType: resolvedTaskType,
           model: candidateModel,
