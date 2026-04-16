@@ -399,26 +399,41 @@ export async function runIterativePlan({
 
     // ── L2: execute all phases in the batch in parallel ──
     //
-    // Cancellation note: The controller below is passed to every runPhase in
-    // the batch and abort() is called in the error/escalate/retry-exhausted
-    // reconciliation branches. At L2 this is belt-and-braces: Promise.all
-    // only resolves once every sibling has settled, so abort() fires AFTER
-    // all siblings have already returned. The hook is in place so a future
-    // L2.x level can add mid-batch fail-fast (e.g. via Promise.race with a
-    // "first-failure" signal) without re-plumbing the signal everywhere.
+    // The controller is passed to every runPhase so that when one sibling
+    // returns an error / escalate / retry_exhausted we can stop the rest
+    // from continuing their *next* attempt / tool call (runPhase re-checks
+    // signal.aborted at every natural boundary). Promise.allSettled here
+    // means slow siblings can't block us from recording a failed sibling
+    // and tripping the abort.
     const controller = new AbortController();
 
     if (batch.length > 1) {
       emitStatus?.(`Running batch ${batchIndex + 1}/${batches.length} — ${batch.length} phases in parallel...`);
     }
 
-    const batchPromises = batch.map((phase) => {
+    // Per-phase budget enforcement: if we've already hit maxPhases, don't
+    // kick off anything more even if this batch has headroom. This stops a
+    // wide fanout from silently overshooting the plan-wide budget.
+    const budgetedPhases = [];
+    for (const phase of batch) {
+      if (totalPhasesExecuted >= maxPhases) {
+        emitStatus?.(`Skipping phase ${phase.id} — plan-wide phase budget reached.`);
+        continue;
+      }
       totalPhasesExecuted += 1;
-      // Build the prior-phase snapshot once per phase from the current ledger.
-      // Phases in the same batch don't see each other (they run in parallel
-      // intentionally). Phases in later batches see the accumulated results
-      // of all previous batches — which is the whole point of a multi-phase
-      // plan.
+      budgetedPhases.push(phase);
+    }
+
+    if (budgetedPhases.length === 0) {
+      ledger.outcome = "budget_exhausted";
+      break;
+    }
+
+    // When one sibling's promise rejects or resolves with a failure we abort
+    // the controller so the remaining siblings can exit at the next natural
+    // boundary (next attempt, next tool call, next critic round).
+    let sawHardFailure = false;
+    const batchPromises = budgetedPhases.map((phase) => {
       const priorPhaseSnapshot = buildPriorPhaseSnapshot(phase, ledger);
       return runPhase(phase, {
         phases,
@@ -438,13 +453,48 @@ export async function runIterativePlan({
         priorPhaseSnapshot,
         runId: plan.taskId ?? "adhoc",
         batchIndex,
-        batchSize: batch.length,
+        batchSize: budgetedPhases.length,
         totalPhases: phases.length,
         signal: controller.signal
+      }).then((result) => {
+        const status = result?.phaseEntry?.status;
+        if (status === "error" || status === "retry_exhausted" || status === "escalated") {
+          sawHardFailure = true;
+          if (!controller.signal.aborted) {
+            controller.abort();
+          }
+        }
+        return result;
       });
     });
 
-    const batchResults = await Promise.all(batchPromises);
+    const settled = await Promise.allSettled(batchPromises);
+    const batchResults = settled.map((entry, index) => {
+      if (entry.status === "fulfilled") return entry.value;
+      // Rejection — synthesize an error phase entry so downstream bookkeeping
+      // continues to work. The loop's catch below will still terminate the
+      // run.
+      const phase = budgetedPhases[index];
+      return {
+        phaseEntry: {
+          id: phase.id,
+          intent: phase.title ?? phase.prompt,
+          status: "error",
+          error: entry.reason?.message ?? String(entry.reason),
+          batchIndex,
+          batchSize: budgetedPhases.length,
+          attempts: 1,
+          criticVerdicts: [],
+          durationMs: 0
+        },
+        verdict: null,
+        error: entry.reason?.message ?? String(entry.reason),
+        cancelled: false
+      };
+    });
+    if (sawHardFailure) {
+      // Downstream reconciliation will find the failed phase and terminate.
+    }
 
     // Push all phase entries to the ledger in batch order
     for (const result of batchResults) {
