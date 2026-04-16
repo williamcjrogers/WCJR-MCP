@@ -3473,6 +3473,86 @@ if (skillsTabEls.tabBtn) {
   });
 }
 
+// Create-skill form. Renders inline below the detail pane. When the user
+// opts in to "generate from conversation" we pass the active conversation id
+// to the IPC and let the backend drive the model.
+const skillsFormEls = {
+  open: document.getElementById("btn-skills-new"),
+  form: document.getElementById("skills-new-form"),
+  cancel: document.getElementById("btn-skills-cancel"),
+  save: document.getElementById("btn-skills-save"),
+  status: document.getElementById("skills-new-status"),
+  id: document.getElementById("skills-new-id"),
+  name: document.getElementById("skills-new-name"),
+  description: document.getElementById("skills-new-description"),
+  triggers: document.getElementById("skills-new-triggers"),
+  body: document.getElementById("skills-new-body"),
+  generate: document.getElementById("skills-new-generate")
+};
+
+function toggleSkillForm(visible) {
+  if (!skillsFormEls.form) return;
+  skillsFormEls.form.classList.toggle("hidden", !visible);
+  if (visible) {
+    if (skillsFormEls.status) skillsFormEls.status.textContent = "";
+    skillsFormEls.id?.focus?.();
+  }
+}
+
+if (skillsFormEls.open) {
+  skillsFormEls.open.addEventListener("click", () => toggleSkillForm(true));
+}
+if (skillsFormEls.cancel) {
+  skillsFormEls.cancel.addEventListener("click", () => toggleSkillForm(false));
+}
+
+if (skillsFormEls.form) {
+  skillsFormEls.form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!api?.createSkill) return;
+    const id = skillsFormEls.id.value.trim();
+    const name = skillsFormEls.name.value.trim();
+    const description = skillsFormEls.description.value.trim();
+    const triggers = skillsFormEls.triggers.value
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const generate = skillsFormEls.generate.checked;
+    const body = generate ? "" : skillsFormEls.body.value.trim();
+    if (!id || !name || !description) {
+      skillsFormEls.status.textContent = "ID, name, and description are required.";
+      return;
+    }
+    if (!generate && !body) {
+      skillsFormEls.status.textContent = "Enter a body or tick 'Generate body from the active conversation'.";
+      return;
+    }
+    skillsFormEls.save.disabled = true;
+    skillsFormEls.status.textContent = generate ? "Generating body…" : "Saving…";
+    try {
+      const result = await api.createSkill({
+        id,
+        name,
+        description,
+        triggers,
+        body: body || undefined,
+        generateFromConversationId: generate ? state?.activeConversationId ?? null : undefined
+      });
+      if (result?.error) {
+        skillsFormEls.status.textContent = `Failed: ${result.error}`;
+        return;
+      }
+      skillsFormEls.status.textContent = `Saved → ${result?.sourcePath ?? id}`;
+      skillsFormEls.body.value = "";
+      await loadSkillsTab({ force: true });
+    } catch (err) {
+      skillsFormEls.status.textContent = `Failed: ${err?.message ?? err}`;
+    } finally {
+      skillsFormEls.save.disabled = false;
+    }
+  });
+}
+
 // ═══════════════════════════════════════════════════════════
 // Logs tab — tail the structured JSONL written by @wcjr/logger.
 // ═══════════════════════════════════════════════════════════

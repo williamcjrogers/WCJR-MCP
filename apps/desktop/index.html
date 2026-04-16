@@ -433,7 +433,10 @@
             <section class="skills-list-panel">
               <div class="skills-list-header">
                 <h3>Installed skills</h3>
-                <button id="btn-skills-reload" type="button" class="btn secondary">Reload</button>
+                <div class="row">
+                  <button id="btn-skills-new" type="button" class="btn secondary">New…</button>
+                  <button id="btn-skills-reload" type="button" class="btn secondary">Reload</button>
+                </div>
               </div>
               <div id="skills-list" class="skills-list" role="list">
                 <p class="hint">Loading skills…</p>
@@ -443,6 +446,39 @@
               <div id="skills-detail" class="skills-detail">
                 <p class="hint">Select a skill on the left to see its full SKILL.md body.</p>
               </div>
+              <form id="skills-new-form" class="skills-new-form hidden">
+                <h3>Create a new skill</h3>
+                <p class="hint">Saved to <code>%APPDATA%\WCJR Assistant\skills\&lt;id&gt;\SKILL.md</code> and reloaded immediately.</p>
+                <label class="row">
+                  <span>ID</span>
+                  <input id="skills-new-id" class="text-input" type="text" placeholder="my-skill-id" required pattern="[a-z0-9][a-z0-9_-]*" />
+                </label>
+                <label class="row">
+                  <span>Name</span>
+                  <input id="skills-new-name" class="text-input" type="text" placeholder="My Skill" required />
+                </label>
+                <label class="row">
+                  <span>Description</span>
+                  <input id="skills-new-description" class="text-input" type="text" placeholder="One-sentence hint for the agent." required />
+                </label>
+                <label class="row">
+                  <span>Triggers</span>
+                  <input id="skills-new-triggers" class="text-input" type="text" placeholder="comma-separated, e.g. /my-skill, do the thing" />
+                </label>
+                <label class="row">
+                  <input id="skills-new-generate" type="checkbox" />
+                  <span>Generate body from the active conversation</span>
+                </label>
+                <label class="skills-new-body-row">
+                  <span>Body (skipped when generating from conversation)</span>
+                  <textarea id="skills-new-body" class="text-input skills-new-body" rows="8" placeholder="Markdown body — will be saved after the frontmatter."></textarea>
+                </label>
+                <div class="row">
+                  <button id="btn-skills-save" type="submit" class="btn primary">Save skill</button>
+                  <button id="btn-skills-cancel" type="button" class="btn secondary">Cancel</button>
+                  <span id="skills-new-status" class="hint"></span>
+                </div>
+              </form>
             </section>
           </div>
         </div>

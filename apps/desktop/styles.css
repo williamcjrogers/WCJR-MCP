@@ -1899,3 +1899,31 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
   border-radius: 3px;
   background: rgba(246, 193, 96, 0.08);
 }
+
+.skills-new-form {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.skills-new-form.hidden { display: none; }
+.skills-new-form h3 {
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  margin: 0 0 4px;
+}
+.skills-new-body-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skills-new-body {
+  font-family: ui-monospace, Consolas, Menlo, monospace;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  min-height: 120px;
+  resize: vertical;
+}

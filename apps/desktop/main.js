@@ -3950,6 +3950,107 @@ function registerIpcHandlers() {
     return { count: summary.count, diagnostics: summary.diagnostics ?? [] };
   });
 
+  ipcMain.handle("assistant:createSkill", async (_event, payload = {}) => {
+    const schema = z.object({
+      id: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/i, "id must be a slug"),
+      name: z.string().min(1),
+      description: z.string().min(1),
+      triggers: z.array(z.string()).optional(),
+      tags: z.array(z.string()).optional(),
+      body: z.string().optional(),
+      generateFromConversationId: z.string().optional(),
+      overwrite: z.boolean().optional()
+    });
+    let parsed;
+    try {
+      parsed = schema.parse(payload);
+    } catch (err) {
+      return { error: err?.issues?.[0]?.message ?? err?.message ?? "invalid payload" };
+    }
+    const id = parsed.id.toLowerCase();
+
+    // Generate a SKILL body from an existing conversation when the caller
+    // asked us to. We call the user's currently-configured task model with
+    // a tight system prompt so the generated body follows the Claude Code /
+    // Cursor Superpowers convention (imperative second-person, short
+    // sections, no placeholders).
+    let body = parsed.body?.trim() ?? "";
+    if (!body && parsed.generateFromConversationId) {
+      const session = getConversationStore().getSession(parsed.generateFromConversationId);
+      if (!session) {
+        return { error: "Source conversation not found." };
+      }
+      const transcript = (session.messages ?? [])
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .slice(-12)
+        .map((m) => `${m.role.toUpperCase()}: ${String(m.content).slice(0, 1500)}`)
+        .join("\n\n");
+      const skillGenPrompt = [
+        `You are drafting a new SKILL.md body for the skill "${parsed.name}" (id: ${id}).`,
+        `Description: ${parsed.description}`,
+        parsed.triggers?.length ? `Triggers: ${parsed.triggers.join(", ")}` : "",
+        `Conversation excerpt to base the skill on:`,
+        transcript,
+        ``,
+        `Return ONLY the markdown body that should live after the frontmatter.`,
+        `Conventions: top-level H1 with the skill name, 3-6 short sections of plain markdown, imperative second-person voice, no placeholders (no "TBD"), no code fences unless the skill actually requires code.`
+      ].filter(Boolean).join("\n\n");
+
+      try {
+        const providerId = "openai";
+        const model = orchestrator?.modelRouter?.selectModel?.("documents", null) ?? "gpt-5.4";
+        const result = await invokeAgenticModel({
+          providerId: resolveProvider(model) ?? providerId,
+          model,
+          prompt: skillGenPrompt,
+          messages: [
+            { role: "system", content: "You draft SKILL.md bodies for a local agent skill registry." },
+            { role: "user", content: skillGenPrompt }
+          ],
+          skipTools: true,
+          suppressStream: true,
+          taskType: "documents"
+        });
+        body = (result?.content ?? "").trim();
+      } catch (err) {
+        return { error: `Skill generation failed: ${err?.message ?? err}` };
+      }
+    }
+
+    if (!body) {
+      return { error: "Either body or generateFromConversationId is required." };
+    }
+
+    const skillDir = path.join(app.getPath("userData"), "skills", id);
+    const skillFile = path.join(skillDir, "SKILL.md");
+    try {
+      const existing = await fs.stat(skillFile).catch(() => null);
+      if (existing && !parsed.overwrite) {
+        return { error: `Skill '${id}' already exists. Pass overwrite:true to replace.` };
+      }
+      await fs.mkdir(skillDir, { recursive: true });
+      const frontmatter = [
+        "---",
+        `id: ${id}`,
+        `name: ${parsed.name}`,
+        `description: "${parsed.description.replace(/"/g, '\\"')}"`,
+        parsed.triggers?.length ? `triggers: [${parsed.triggers.map((t) => `"${t}"`).join(", ")}]` : "triggers: []",
+        parsed.tags?.length ? `tags: [${parsed.tags.map((t) => `"${t}"`).join(", ")}]` : "tags: []",
+        "internalOnly: false",
+        `version: "0.1.0"`,
+        "---",
+        ""
+      ].join("\n");
+      await fs.writeFile(skillFile, `${frontmatter}${body}\n`, "utf-8");
+    } catch (err) {
+      return { error: `Failed to write skill: ${err?.message ?? err}` };
+    }
+
+    const summary = await reloadSkills();
+    log.info("skill created", { id, generated: !parsed.body });
+    return { ok: true, id, sourcePath: skillFile, count: summary?.count ?? 0 };
+  });
+
   ipcMain.handle("assistant:getRunTrace", async (_event, taskId) => {
     if (typeof taskId !== "string" || !taskId.trim()) return null;
     const file = path.join(runsDirPath(), `${taskId}.jsonl`);
