@@ -445,12 +445,92 @@ function matchesQuery(values, query) {
     .some((value) => compactWhitespace(value).toLowerCase().includes(normalizedQuery));
 }
 
+const AUDIT_ACTION_LABELS = {
+  task_created: "Task started",
+  task_status: "Status update",
+  task_progress: "Progress",
+  task_classified: "Category",
+  task_completed: "Completed",
+  task_failed: "Failed",
+  task_cancelled: "Cancelled",
+  subagent_completed: "Step completed",
+  tool_call: "Tool used",
+  tool_result: "Tool result",
+  retrieval_started: "Gathering context",
+  retrieval_completed: "Context ready",
+  critic_verdict: "Quality check",
+  lesson_written: "Lesson recorded",
+  phase_started: "Phase started",
+  phase_completed: "Phase completed"
+};
+
+const TASK_TYPE_LABELS = {
+  project_mgmt: "Planning & workflow",
+  orchestrator: "Orchestration",
+  research: "Research",
+  coding: "Code & repositories",
+  documents: "Documents",
+  automation: "Files & desktop",
+  data_analysis: "Data & spreadsheets",
+  communication: "Email & calendar",
+  creative: "Creative",
+  disputes: "Disputes & claims",
+  aws_cloud: "Cloud infrastructure"
+};
+
+function humanizeAuditAction(action) {
+  return AUDIT_ACTION_LABELS[action] ?? action.replace(/_/g, " ");
+}
+
 function formatAuditDetail(detail = {}) {
   if (!detail || typeof detail !== "object") return "";
-  const entries = Object.entries(detail)
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => `${key}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
-  return entries.join("\n");
+
+  const parts = [];
+  for (const [key, value] of Object.entries(detail)) {
+    if (value === undefined || value === null || value === "") continue;
+
+    // Skip internal IDs and noisy fields
+    if (key === "taskId" || key === "pendingApproval") continue;
+
+    // Humanize known keys
+    if (key === "taskType") {
+      parts.push(TASK_TYPE_LABELS[value] ?? value);
+      continue;
+    }
+    if (key === "status") {
+      const statusLabels = { running: "Running", completed: "Done", failed: "Failed", cancelled: "Cancelled", pending: "Waiting" };
+      parts.push(statusLabels[value] ?? value);
+      continue;
+    }
+    if (key === "model") {
+      parts.push(`Model: ${value}`);
+      continue;
+    }
+    if (key === "agentName") {
+      parts.push(`${value} finished`);
+      continue;
+    }
+    if (key === "prompt") {
+      const short = String(value).length > 80 ? `${String(value).slice(0, 80)}...` : String(value);
+      parts.push(short);
+      continue;
+    }
+    if (key === "progress" && typeof value === "object") {
+      if (value.message) parts.push(value.message);
+      continue;
+    }
+    if (key === "progress" && typeof value === "string") {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed.message) { parts.push(parsed.message); continue; }
+      } catch { /* not JSON, fall through */ }
+    }
+
+    // Generic fallback — skip if it looks like an internal object
+    if (typeof value === "object") continue;
+    parts.push(String(value));
+  }
+  return parts.join(" · ");
 }
 
 function parseFallbackChainFromTimeline(timeline = []) {
@@ -1392,7 +1472,7 @@ function renderAuditTrail() {
       (entry) => `
         <div class="audit-item">
           <div class="audit-item-header">
-            <span class="audit-item-action">${escapeHtml(entry.action ?? "event")}</span>
+            <span class="audit-item-action">${escapeHtml(humanizeAuditAction(entry.action ?? "event"))}</span>
             <span class="audit-item-time">${escapeHtml(formatMessageTimestamp(entry.at))}</span>
           </div>
           <div class="audit-item-detail">${escapeHtml(formatAuditDetail(entry.detail ?? {}))}</div>

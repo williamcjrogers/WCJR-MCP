@@ -176,11 +176,25 @@ function joinCandidatePath(basePath, entryName) {
 }
 
 function extractFilePathsFromDirectoryListing(basePath, listingText) {
+  // filesystem-mcp list_directory format (since 2026-04-11):
+  //   FILE <mtime-iso> <size> <name>
+  //   DIR  -           -      <name>
+  // Legacy format was `FILE <name>`. Handle both: strip the FILE prefix and,
+  // if the remainder has 3+ whitespace-separated tokens, drop the first two
+  // (mtime + size) and keep the rest as the filename.
   return String(listingText ?? "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => /^FILE\s+/i.test(line))
-    .map((line) => line.replace(/^FILE\s+/i, "").trim())
+    .map((line) => {
+      const rest = line.replace(/^FILE\s+/i, "").trim();
+      const tokens = rest.split(/\s+/);
+      if (tokens.length >= 3) {
+        // New format: mtime, size, name (name may contain spaces, so rejoin)
+        return tokens.slice(2).join(" ").trim();
+      }
+      return rest;
+    })
     .filter((name) => DOCUMENT_FILE_PATTERN.test(name))
     .map((name) => joinCandidatePath(basePath, name))
     .slice(0, 8);

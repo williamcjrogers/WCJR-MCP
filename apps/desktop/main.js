@@ -1740,6 +1740,68 @@ function filterToolSummaryForTaskType(toolSummary, taskType) {
   return filtered.length ? filtered : toolSummary;
 }
 
+/**
+ * Intent-based tool scoping. When the prompt clearly names a specific MCP
+ * domain (folder browse, inbox, calendar), we narrow the tool set to ONLY
+ * servers of that kind. This:
+ *   (a) stays under OpenAI's 128-tool hard cap (148 discovered > 128)
+ *   (b) stops the model from grabbing unrelated tools like Lookeen search
+ *       when the user asked for a directory listing
+ *   (c) is independent of taskType classification, which is imperfect
+ *
+ * Returns the filtered summary if a match is applied, otherwise the input
+ * unchanged.
+ */
+function filterToolSummaryByPromptIntent(toolSummary, prompt) {
+  if (!prompt || !toolSummary?.length) return toolSummary;
+
+  const text = String(prompt).toLowerCase();
+  // Folder browse / file listing: "list files in downloads", "what files are in C:\foo"
+  const isFolderBrowse =
+    /\b(files?|folders?|directories|directory|downloads?|desktop|documents?|contents?|drives?)\b/.test(text) &&
+    /\b(list|show|display|open|read|count|find|fetch|grab|tell me|give me|what(?:\s+are)?|where|which|how many|latest|recent|newest|oldest|top \d+)\b/.test(text);
+  const isInbox =
+    /\b(email|emails|inbox|messages?)\b/.test(text) &&
+    /\b(list|show|display|count|read|latest|recent|unread|search|find)\b/.test(text);
+  const isCalendar =
+    /\b(calendar|schedule|meeting|meetings?|appointments?|events?)\b/.test(text) &&
+    /\b(list|show|display|upcoming|today|tomorrow|this week|next)\b/.test(text);
+
+  let targetKinds = null;
+  if (isFolderBrowse) targetKinds = ["builtin-filesystem", "builtin-file-ops"];
+  else if (isInbox || isCalendar) targetKinds = ["builtin-mail-calendar"];
+
+  if (!targetKinds) return toolSummary;
+
+  const enabledServers = (appConfig?.mcpServers ?? []).filter((server) => server.enabled !== false);
+  const targetServerNames = new Set(
+    enabledServers
+      .filter((server) => targetKinds.includes(server.kind))
+      .map((server) => server.name)
+  );
+
+  if (!targetServerNames.size) return toolSummary;
+
+  const filtered = toolSummary.filter((entry) => targetServerNames.has(entry.server));
+  return filtered.length ? filtered : toolSummary;
+}
+
+/**
+ * OpenAI has a hard 128-tool limit on the `tools` array. Slice down when
+ * exceeded so the request doesn't 400 outright. This should rarely fire
+ * once intent-based scoping is in place, but it's a cheap safety net.
+ */
+function capToolsForOpenAI(tools, providerId) {
+  const OPENAI_LIKE = new Set(["openai", "openai-responses", "grok", "ollama", "perplexity"]);
+  if (!OPENAI_LIKE.has(providerId)) return tools;
+  const HARD_CAP = 120; // sub-128 safety margin
+  if (tools.length <= HARD_CAP) return tools;
+  console.warn(
+    `[invokeAgenticModel] ${providerId} tool count ${tools.length} > ${HARD_CAP}; truncating`
+  );
+  return tools.slice(0, HARD_CAP);
+}
+
 function hasConnectedTools(toolSummary) {
   return toolSummary.some(
     (entry) => (entry.toolDetails?.length ?? entry.tools?.length ?? 0) > 0
@@ -2178,6 +2240,7 @@ async function invokeAgenticModel({
   onChunk,
   suppressStream = false,
   skipTools = false,
+  skipToolFilter = false,
   taskType,
   signal,
   taskContext
@@ -2215,10 +2278,18 @@ async function invokeAgenticModel({
     });
   }
 
-  const filteredToolSummary = filterToolSummaryForTaskType(
-    await orchestrator.mcpHub.getToolSummary(),
-    taskType
-  );
+  const fullToolSummary = await orchestrator.mcpHub.getToolSummary();
+  const taskTypeFiltered = skipToolFilter
+    ? fullToolSummary
+    : filterToolSummaryForTaskType(fullToolSummary, taskType);
+  // Intent-based scoping runs REGARDLESS of skipToolFilter. For folder-browse
+  // / inbox / calendar prompts, narrow to just the matching MCP kind so the
+  // model can't pick a wrong-domain tool (e.g. Lookeen search instead of
+  // list_directory) and tool count stays well under OpenAI's 128 cap.
+  // Trivial tasks set skipToolFilter=true to bypass the task-type preset
+  // filter (which depends on imperfect classification), but intent scoping
+  // is prompt-driven and should always apply.
+  const filteredToolSummary = filterToolSummaryByPromptIntent(taskTypeFiltered, prompt);
 
   if (!hasConnectedTools(filteredToolSummary)) {
     return invokeDirectModel({
@@ -2233,10 +2304,11 @@ async function invokeAgenticModel({
   }
 
   clearToolNameRegistry();
-  const tools =
+  const rawTools =
     providerId === "gemini"
       ? mcpToolsToGeminiFunctions(filteredToolSummary)
       : mcpToolsToOpenAIFunctions(filteredToolSummary);
+  const tools = capToolsForOpenAI(rawTools, providerId);
 
   if (!tools.length) {
     return invokeDirectModel({

@@ -104,17 +104,40 @@ function toRelativePath(absolutePath) {
   return relativePath || ".";
 }
 
-function formatDirectoryListing(basePath, entries) {
+async function formatDirectoryListing(displayPath, absolutePath, entries) {
   if (entries.length === 0) {
-    return `Directory ${basePath} is empty.`;
+    return `Directory ${displayPath} is empty.`;
   }
 
-  return [
-    `Directory: ${basePath}`,
-    ...entries.map((entry) => {
-      const entryType = entry.isDirectory() ? "DIR " : "FILE";
-      return `${entryType} ${entry.name}`;
+  // Stat files in parallel for mtime/size; directories don't need stats.
+  // Stats are appended so an agent can sort by recency ("10 latest files")
+  // without a second tool call. Parser contract (see retrieval.js
+  // extractFilePathsFromDirectoryListing): each FILE line starts with
+  // "FILE " then three whitespace-separated columns (mtime, size, name).
+  // The retrieval parser strips all three leading tokens to recover the name.
+  const rows = await Promise.all(
+    entries.map(async (entry) => {
+      if (entry.isDirectory()) {
+        return `DIR  -                        -          ${entry.name}`;
+      }
+      if (entry.isFile()) {
+        try {
+          const stat = await fs.stat(path.join(absolutePath, entry.name));
+          const mtime = stat.mtime.toISOString();
+          const size = String(stat.size).padStart(10, " ");
+          return `FILE ${mtime} ${size} ${entry.name}`;
+        } catch {
+          return `FILE -                        -          ${entry.name}`;
+        }
+      }
+      return `FILE -                        -          ${entry.name}`;
     })
+  );
+
+  return [
+    `Directory: ${displayPath}`,
+    `Columns: TYPE MTIME(ISO8601) SIZE(bytes) NAME`,
+    ...rows
   ].join("\n");
 }
 
@@ -261,7 +284,7 @@ const server = new McpServer({
 server.registerTool(
   "list_directory",
   {
-    description: "List directories and files under the configured root path, or anywhere when full access is enabled.",
+    description: "List directories and files under the configured root path, or anywhere when full access is enabled. Returns each entry as a row with TYPE, MTIME (ISO 8601), SIZE (bytes), and NAME columns — sort by MTIME descending for 'latest/newest' queries. Directories have '-' for MTIME and SIZE.",
     inputSchema: {
       path: z.string().optional().describe("Absolute or relative path inside the allowed root.")
     }
@@ -286,7 +309,7 @@ server.registerTool(
       content: [
         {
           type: "text",
-          text: formatDirectoryListing(toRelativePath(absolutePath), entries)
+          text: await formatDirectoryListing(toRelativePath(absolutePath), absolutePath, entries)
         }
       ]
     };
