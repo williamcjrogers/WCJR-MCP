@@ -7,6 +7,14 @@ export const VERDICT_SCHEMA_DECISIONS = new Set([
   "escalate"
 ]);
 
+/**
+ * Critic output on degraded runs. The planner treats this as "let the phase
+ * pass through but mark the ledger phase as accepted_degraded so downstream
+ * can tell the difference from a genuine accept". Never replace this with a
+ * silent `accept`: that hallucinates success.
+ */
+export const DEGRADED_DECISION = "degraded";
+
 const CRITIC_SYSTEM = `You are auditing another agent's work. You do not execute tools — you judge.
 
 Decide exactly one:
@@ -58,7 +66,7 @@ export function buildCriticPrompt({
 
 export function parseVerdict(raw) {
   if (typeof raw !== "string" || !raw.trim()) {
-    return { decision: "accept", reasoning: "critic returned empty", confidence: 0, _parseError: true };
+    return { decision: DEGRADED_DECISION, reasoning: "critic returned empty", confidence: 0, _parseError: true };
   }
 
   // Extract JSON from a fenced block if present (handles model preambles),
@@ -70,13 +78,23 @@ export function parseVerdict(raw) {
   try {
     parsed = JSON.parse(cleaned);
   } catch {
-    console.warn("[critic] malformed verdict JSON, degrading to accept");
-    return { decision: "accept", reasoning: `parse error: ${raw.slice(0, 120)}`, confidence: 0, _parseError: true };
+    console.warn("[critic] malformed verdict JSON — returning degraded verdict");
+    return {
+      decision: DEGRADED_DECISION,
+      reasoning: `parse error: ${raw.slice(0, 120)}`,
+      confidence: 0,
+      _parseError: true
+    };
   }
 
   if (!parsed || typeof parsed !== "object" || !VERDICT_SCHEMA_DECISIONS.has(parsed.decision)) {
-    console.warn(`[critic] unknown decision '${parsed?.decision}', degrading to accept`);
-    return { decision: "accept", reasoning: "unknown decision value", confidence: 0, _parseError: true };
+    console.warn(`[critic] unknown decision '${parsed?.decision}' — returning degraded verdict`);
+    return {
+      decision: DEGRADED_DECISION,
+      reasoning: "unknown decision value",
+      confidence: 0,
+      _parseError: true
+    };
   }
 
   return {
@@ -138,7 +156,12 @@ export async function runCritic({
     });
     return parseVerdict(result.content);
   } catch (err) {
-    console.error("[critic] invocation failed, degrading to accept:", err?.message ?? err);
-    return { decision: "accept", reasoning: `critic failed: ${err?.message ?? err}`, confidence: 0, _parseError: true };
+    console.error("[critic] invocation failed — returning degraded verdict:", err?.message ?? err);
+    return {
+      decision: DEGRADED_DECISION,
+      reasoning: `critic failed: ${err?.message ?? err}`,
+      confidence: 0,
+      _parseError: true
+    };
   }
 }

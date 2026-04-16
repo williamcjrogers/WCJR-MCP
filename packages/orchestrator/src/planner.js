@@ -213,6 +213,17 @@ async function runPhase(phase, ctx) {
         break;
       }
 
+      if (verdict.decision === "degraded") {
+        // The critic itself failed (error, bad JSON, unknown decision). The
+        // phase passed execution so we pass through — but we tag the ledger
+        // entry as accepted_degraded so the caller / UI can surface that the
+        // audit was skipped. No more silent accept that hallucinates success.
+        emitStatus?.(`Phase ${phaseNum} completed; critic unavailable — flagged as degraded.`);
+        phaseEntry.status = "accepted_degraded";
+        accepted = true;
+        break;
+      }
+
       if (verdict.decision === "retry_phase") {
         retryGuidance = verdict.retryGuidance ?? verdict.reasoning;
         emitStatus?.(`Retrying phase ${phaseNum} (attempt ${attempt + 2}/${maxCriticRounds})...`);
@@ -495,12 +506,16 @@ export async function runIterativePlan({
     batchIndex += 1;
   }
 
+  const degradedCount = ledger.phases.filter((p) => p.status === "accepted_degraded").length;
   if (!ledger.outcome) {
-    ledger.outcome = "success";
+    ledger.outcome = degradedCount > 0 ? "completed_with_warnings" : "success";
   }
   ledger.endedAt = Date.now();
   ledger.budget.wallClockMs = Date.now() - startedAt;
   ledger.budget.phasesUsed = totalPhasesExecuted;
+  if (degradedCount > 0) {
+    ledger.degradedPhases = degradedCount;
+  }
 
   // ── L1: merge phase-level artifacts into a run-level list ──
   const allArtifacts = ledger.phases.flatMap((p) => p.artifacts ?? []);
