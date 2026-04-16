@@ -10,32 +10,26 @@
     "apps/**/*",
     "packages/**/*",
     "node_modules/**/*",
+    "skills/**/*",
     "package.json"
   ],
   "extraMetadata": {
     "main": "apps/desktop/main.js"
   },
   "extraResources": [
-    {
-      "from": "packages/filesystem-mcp/src/server.js",
-      "to": "filesystem-mcp/server.js"
-    },
-    {
-      "from": "packages/document-ops/src/server.js",
-      "to": "document-ops/server.js"
-    },
-    {
-      "from": "packages/file-ops/src/server.js",
-      "to": "file-ops/server.js"
-    },
-    {
-      "from": "packages/browser-ops/src/server.js",
-      "to": "browser-ops/server.js"
-    },
-    {
-      "from": "packages/mail-calendar/src/server.js",
-      "to": "mail-calendar/server.js"
-    }
+    { "from": "packages/filesystem-mcp/src/server.js", "to": "filesystem-mcp/server.js" },
+    { "from": "packages/document-ops/src/server.js", "to": "document-ops/server.js" },
+    { "from": "packages/file-ops/src/server.js", "to": "file-ops/server.js" },
+    { "from": "packages/browser-ops/src/server.js", "to": "browser-ops/server.js" },
+    { "from": "packages/mail-calendar/src/server.js", "to": "mail-calendar/server.js" },
+    { "from": "packages/memory-mcp/src/server.js", "to": "memory-mcp/server.js" },
+    { "from": "packages/shell-exec/src/server.js", "to": "shell-exec/server.js" },
+    { "from": "packages/git-ops/src/server.js", "to": "git-ops/server.js" },
+    { "from": "packages/desktop-commander/src/server.js", "to": "desktop-commander/server.js" },
+    { "from": "packages/qdrant-rag-mcp/src/server.js", "to": "qdrant-rag-mcp/server.js" },
+    { "from": "packages/xlsx-engine-mcp/src/server.js", "to": "xlsx-engine-mcp/server.js" },
+    { "from": "packages/docx-engine-mcp/src/server.js", "to": "docx-engine-mcp/server.js" },
+    { "from": "skills", "to": "skills" }
   ],
   "win": {
     "target": [

@@ -329,20 +329,60 @@ function normalizeRoots(server, fallbackRoot) {
   return [...new Set(roots.map((root) => path.resolve(root)))];
 }
 
-function builtinServerProcessConfig(packageFolder, args = []) {
-  if (app.isPackaged) {
-    const scriptPath = path.join(app.getAppPath(), "packages", packageFolder, "src", "server.js");
-    return {
-      command: "node",
-      args: [scriptPath, ...args],
-      cwd: app.getAppPath()
-    };
+/**
+ * Map package folder names to the shape we ship them as inside the portable
+ * build. In dev we always run from source. In packaged builds prefer a path
+ * under `process.resourcesPath` (electron-builder extraResources) which is
+ * unpacked whether or not asar is enabled; fall back to the app path for
+ * packages that haven't been lifted into extraResources yet.
+ */
+function resolveBuiltinServerScript(packageFolder) {
+  if (!app.isPackaged) {
+    return path.resolve(__dirname, "..", "..", "packages", packageFolder, "src", "server.js");
   }
+  const folderMap = {
+    "filesystem-mcp": "filesystem-mcp",
+    "document-ops": "document-ops",
+    "file-ops": "file-ops",
+    "browser-ops": "browser-ops",
+    "mail-calendar": "mail-calendar",
+    "memory-mcp": "memory-mcp",
+    "shell-exec": "shell-exec",
+    "git-ops": "git-ops",
+    "desktop-commander": "desktop-commander",
+    "qdrant-rag-mcp": "qdrant-rag-mcp",
+    "xlsx-engine-mcp": "xlsx-engine-mcp",
+    "docx-engine-mcp": "docx-engine-mcp"
+  };
+  const resourceFolder = folderMap[packageFolder];
+  if (resourceFolder) {
+    return path.join(process.resourcesPath, resourceFolder, "server.js");
+  }
+  return path.join(app.getAppPath(), "packages", packageFolder, "src", "server.js");
+}
 
+function builtinServerProcessConfig(packageFolder, args = [], extraEnv = {}) {
+  const scriptPath = resolveBuiltinServerScript(packageFolder);
+  const cwd = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
+  // Spawn Electron's bundled Node via `process.execPath` + ELECTRON_RUN_AS_NODE
+  // so a packaged build doesn't depend on the user having `node` on PATH.
+  // In dev `process.execPath` is the Electron binary from node_modules; that
+  // also works with the ELECTRON_RUN_AS_NODE env flag.
+  //
+  // StdioClientTransport forwards `env` to Node's `spawn`, which *replaces*
+  // the child's environment entirely when present — so we must merge the
+  // parent `process.env` or the child loses PATH, TEMP, HOME, etc. (On
+  // Windows this manifests as "EPERM: cannot load DLL" when a native module
+  // fails to find its runtime.)
   return {
-    command: "node",
-    args: [path.resolve(__dirname, "..", "..", "packages", packageFolder, "src", "server.js"), ...args],
-    cwd: path.resolve(__dirname, "..", "..")
+    command: process.execPath,
+    args: [scriptPath, ...args],
+    cwd,
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      ...extraEnv
+    }
   };
 }
 
@@ -652,8 +692,11 @@ function hydrateMcpServer(server) {
       enabled: server.enabled !== false,
       kind: "builtin-mail-calendar",
       transport: "stdio",
-      ...builtinServerProcessConfig("mail-calendar", ["--config", mailCalendarConfigPath()]),
-      env: buildMailCalendarServerEnv()
+      ...builtinServerProcessConfig(
+        "mail-calendar",
+        ["--config", mailCalendarConfigPath()],
+        buildMailCalendarServerEnv()
+      )
     };
   }
   if (server.kind === "builtin-browser-ops") {
