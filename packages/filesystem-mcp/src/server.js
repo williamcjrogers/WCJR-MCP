@@ -76,7 +76,18 @@ function getOwningRoot(resolvedPath) {
   )?.rootPath ?? null;
 }
 
-function ensureAllowedPath(requestedPath = ".") {
+/**
+ * Resolve a requested path, verify it lives inside an allowed root, AND
+ * re-check the same constraint after resolving symlinks. Without the realpath
+ * re-check, any writer with access to the root can drop a symlink pointing at
+ * `C:\Windows\System32\config\SAM` (or `/etc/shadow`) and exfiltrate it via
+ * `read_text_file`.
+ *
+ * If the path doesn't exist yet (creation flows), we still enforce the
+ * prefix check on the parent directory's realpath to defend against a
+ * symlinked parent.
+ */
+async function ensureAllowedPath(requestedPath = ".") {
   const baseRoot = rootPaths[0];
   const resolvedPath = path.isAbsolute(requestedPath)
     ? path.resolve(requestedPath)
@@ -86,7 +97,39 @@ function ensureAllowedPath(requestedPath = ".") {
     throw new Error("Requested path is outside the allowed root directory.");
   }
 
-  return resolvedPath;
+  if (allowAnyPath) {
+    return resolvedPath;
+  }
+
+  let canonical = resolvedPath;
+  try {
+    canonical = await fs.realpath(resolvedPath);
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      // Path doesn't exist yet — check the closest existing ancestor.
+      let ancestor = path.dirname(resolvedPath);
+      while (ancestor && ancestor !== path.dirname(ancestor)) {
+        try {
+          const ancestorReal = await fs.realpath(ancestor);
+          if (!getOwningRoot(ancestorReal)) {
+            throw new Error("Requested path resolves outside the allowed root directory (symlinked ancestor).");
+          }
+          return resolvedPath;
+        } catch (ancestorErr) {
+          if (ancestorErr?.code !== "ENOENT") throw ancestorErr;
+          ancestor = path.dirname(ancestor);
+        }
+      }
+      return resolvedPath;
+    }
+    throw err;
+  }
+
+  if (!getOwningRoot(canonical)) {
+    throw new Error("Requested path resolves outside the allowed root directory (symlink escape).");
+  }
+
+  return canonical;
 }
 
 function toRelativePath(absolutePath) {
@@ -142,7 +185,7 @@ async function formatDirectoryListing(displayPath, absolutePath, entries) {
 }
 
 async function readTextFileSafe(filePath, maxChars = 16000) {
-  const absolutePath = ensureAllowedPath(filePath);
+  const absolutePath = await ensureAllowedPath(filePath);
   const content = await fs.readFile(absolutePath, "utf-8");
   if (content.length <= maxChars) {
     return content;
@@ -197,7 +240,7 @@ async function searchTextInFiles(startPath, query, maxResults) {
   const startRoots =
     startPath === "." && !allowAnyPath
       ? rootPaths
-      : [ensureAllowedPath(startPath)];
+      : [await ensureAllowedPath(startPath)];
 
   for (const absoluteStart of startRoots) {
     const shouldStop = await walkFiles(absoluteStart, async (absolutePath) => {
@@ -249,7 +292,7 @@ async function findFilesByName(startPath, query, maxResults) {
   const startRoots =
     startPath === "." && !allowAnyPath
       ? rootPaths
-      : [ensureAllowedPath(startPath)];
+      : [await ensureAllowedPath(startPath)];
 
   for (const absoluteStart of startRoots) {
     const shouldStop = await walkFiles(absoluteStart, async (absolutePath) => {
@@ -303,7 +346,7 @@ server.registerTool(
         ]
       };
     }
-    const absolutePath = ensureAllowedPath(requestedPath);
+    const absolutePath = await ensureAllowedPath(requestedPath);
     const entries = await fs.readdir(absolutePath, { withFileTypes: true });
     return {
       content: [
@@ -401,7 +444,7 @@ server.registerTool(
     }
   },
   async ({ path: requestedPath, maxChars = 50000 }) => {
-    const absolutePath = ensureAllowedPath(requestedPath);
+    const absolutePath = await ensureAllowedPath(requestedPath);
     const buffer = await fs.readFile(absolutePath);
     const result = await extractDocumentText({
       buffer,
@@ -444,7 +487,7 @@ server.registerTool(
     }
   },
   async ({ path: requestedPath, content, dryRun }) => {
-    const absolutePath = ensureAllowedPath(requestedPath);
+    const absolutePath = await ensureAllowedPath(requestedPath);
     if (dryRun) {
       return { content: [{ type: "text", text: `[Dry run] Would write ${content?.length ?? 0} chars to: ${toRelativePath(absolutePath)}` }] };
     }
