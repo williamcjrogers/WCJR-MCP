@@ -44,12 +44,18 @@ function truncate(text, max = MAX_OUTPUT_CHARS) {
   return text.slice(0, max) + `\n...[truncated, ${text.length - max} chars omitted]`;
 }
 
-function runProcess(command, cmdArgs, cwd, timeoutMs, onStdout) {
+function runProcess(command, cmdArgs, cwd, timeoutMs, onStdout, { useShell = false } = {}) {
   return new Promise((resolve) => {
+    // shell:true routes args through cmd.exe on Windows and a POSIX shell
+    // elsewhere, which would let model-supplied args containing `&`, `|`,
+    // `>`, `^` execute extra commands. Default to shell:false so the command
+    // is resolved and invoked directly via the OS exec call. `run_script`
+    // opts in explicitly because it intentionally takes multi-line shell
+    // snippets.
     const child = spawn(command, cmdArgs, {
       cwd,
       windowsHide: true,
-      shell: process.platform === "win32"
+      shell: useShell
     });
 
     let stdout = "";
@@ -105,24 +111,33 @@ server.registerTool(
     description: [
       "Execute a shell command in a specified working directory and return stdout + stderr.",
       "The cwd must be within the allowed working directories configured at startup.",
+      "Args are passed directly to the executable (no shell interpretation) —",
+      "shell metacharacters in `args` are not interpreted. Use run_script for that.",
       "For long-running commands, set timeoutSeconds (default 60, max 300).",
       "Returns: { stdout, stderr, exitCode, timedOut }."
     ].join(" "),
     inputSchema: {
-      command: { type: "string", description: "The executable to run (e.g. 'node', 'npm', 'python')." },
-      args: {
-        type: "array",
-        items: { type: "string" },
-        description: "Arguments to pass to the command."
-      },
-      cwd: {
-        type: "string",
-        description: `Working directory for the command. Must be within allowed dirs: ${allowedCwds.join(", ")}.`
-      },
-      timeoutSeconds: {
-        type: "number",
-        description: "Timeout in seconds. Default 60, max 300."
-      }
+      command: z
+        .string()
+        .min(1)
+        .describe("The executable to run (e.g. 'node', 'npm', 'python')."),
+      args: z
+        .array(z.string())
+        .optional()
+        .describe("Arguments to pass to the command."),
+      cwd: z
+        .string()
+        .optional()
+        .describe(
+          `Working directory for the command. Must be within allowed dirs: ${allowedCwds.join(", ")}.`
+        ),
+      timeoutSeconds: z
+        .number()
+        .int()
+        .positive()
+        .max(300)
+        .optional()
+        .describe("Timeout in seconds. Default 60, max 300.")
     }
   },
   async ({ command, args: cmdArgs = [], cwd, timeoutSeconds = 60 }) => {
@@ -153,15 +168,21 @@ server.registerTool(
 server.registerTool(
   "run_script",
   {
-    description: "Run a multi-line shell script by writing it to a temp file and executing it. Use for complex sequences.",
+    description: "Run a multi-line shell script. The script runs inside the chosen shell (cmd/pwsh/bash) so shell metacharacters ARE interpreted — use run_command when you need literal argument passing without interpretation.",
     inputSchema: {
-      script: { type: "string", description: "Multi-line shell script content." },
-      cwd: { type: "string", description: "Working directory." },
-      shell: {
-        type: "string",
-        description: "Shell to use: 'cmd', 'powershell', 'bash'. Defaults to platform default."
-      },
-      timeoutSeconds: { type: "number", description: "Timeout in seconds. Default 120, max 300." }
+      script: z.string().min(1).describe("Multi-line shell script content."),
+      cwd: z.string().optional().describe("Working directory."),
+      shell: z
+        .enum(["cmd", "powershell", "pwsh", "bash", "sh"])
+        .optional()
+        .describe("Shell to use. Defaults to platform default (cmd on Windows, sh elsewhere)."),
+      timeoutSeconds: z
+        .number()
+        .int()
+        .positive()
+        .max(300)
+        .optional()
+        .describe("Timeout in seconds. Default 120, max 300.")
     }
   },
   async ({ script, cwd, shell: shellChoice, timeoutSeconds = 120 }) => {
@@ -186,7 +207,8 @@ server.registerTool(
       command = shellChoice === "bash" ? "bash" : "sh";
       cmdArgs = ["-c", script];
     }
-    const result = await runProcess(command, cmdArgs, workDir, timeoutMs);
+    // run_script intentionally runs inside a shell — that's the whole point.
+    const result = await runProcess(command, cmdArgs, workDir, timeoutMs, undefined, { useShell: false });
     const summary = [
       `Exit code: ${result.code}${result.timedOut ? " (timed out)" : ""}`,
       result.stdout ? `\nSTDOUT:\n${result.stdout}` : "",
@@ -204,7 +226,7 @@ server.registerTool(
   {
     description: "Kill a running process by PID. Use to stop a timed-out or runaway command.",
     inputSchema: {
-      pid: { type: "number", description: "Process ID to kill." }
+      pid: z.number().int().positive().describe("Process ID to kill.")
     }
   },
   async ({ pid }) => {

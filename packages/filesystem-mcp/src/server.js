@@ -438,9 +438,9 @@ server.registerTool(
   {
     description: "Write or overwrite a UTF-8 text file within the allowed root path. Creates parent directories automatically.",
     inputSchema: {
-      path: { type: "string", description: "File path (relative to root or absolute within allowed root)." },
-      content: { type: "string", description: "Full text content to write." },
-      dryRun: { type: "boolean", description: "If true, validates path but does not write. Default false." }
+      path: z.string().min(1).describe("File path (relative to root or absolute within allowed root)."),
+      content: z.string().describe("Full text content to write."),
+      dryRun: z.boolean().optional().describe("If true, validates path but does not write. Default false.")
     }
   },
   async ({ path: requestedPath, content, dryRun }) => {
