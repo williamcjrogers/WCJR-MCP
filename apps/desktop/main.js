@@ -170,9 +170,11 @@ let memoryStore;
 let policyEngine;
 let messagingBridge;
 let configSaveQueue = Promise.resolve();
-// chatId (number) → { taskId, conversationId } for plan approval via Telegram
+// taskId (string) → { conversationId, chatId } for plan approval via Telegram.
+// Keyed by taskId (unique per plan) instead of chatId so a user cannot accidentally
+// (or maliciously) approve someone else's plan from the same chat.
 const pendingTelegramPlans = new Map();
-let _approvePlanImpl = async () => { throw new Error("approvePlan not yet initialized"); };
+let executeApprovedPlan = async () => { throw new Error("approvePlan not yet initialized"); };
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 const startupLogPath = path.join(
@@ -3190,8 +3192,8 @@ function registerIpcHandlers() {
     return runAssistantTaskRequest(payload);
   });
 
-  ipcMain.handle("assistant:approvePlan", async (_event, payload) => _approvePlanImpl(payload));
-  _approvePlanImpl = async (payload) => {
+  ipcMain.handle("assistant:approvePlan", async (_event, payload) => executeApprovedPlan(payload));
+  executeApprovedPlan = async (payload) => {
     const schema = z.object({
       taskId: z.string(),
       conversationId: z.string(),
@@ -3919,27 +3921,36 @@ async function startMessagingBridge() {
       }
 
       // ── Plan approval via Telegram ──────────────────────────────────────────
+      // The map is keyed by taskId so a user cannot approve a plan that wasn't
+      // originated from their chat. Slash commands always look up the most
+      // recent pending plan for this chat.
       if (trimmedText === "/approve" || trimmedText === "/reject") {
-        const pending = pendingTelegramPlans.get(cmd.chatId);
-        if (!pending) {
+        const pendingEntry = [...pendingTelegramPlans.entries()].findLast(
+          ([, entry]) => entry.chatId === cmd.chatId
+        );
+        if (!pendingEntry) {
           if (messagingBridge) {
             await messagingBridge.replyToCommand(cmd.id, "No pending plan to approve. Send a task first.");
           }
           return;
         }
-        pendingTelegramPlans.delete(cmd.chatId);
+        const [pendingTaskId, pending] = pendingEntry;
 
         if (trimmedText === "/reject") {
+          pendingTelegramPlans.delete(pendingTaskId);
           if (messagingBridge) {
             await messagingBridge.replyToCommand(cmd.id, "Plan rejected. Send a new task when ready.");
           }
           return;
         }
 
-        // /approve — execute the approved plan
+        // /approve — run the shared plan-execution function directly. The
+        // function mutates pendingExecutionPlan itself, so we do NOT touch
+        // task state here before calling it. On failure the plan remains
+        // pending and the user can retry.
         if (messagingBridge) {
           messagingBridge.sendUpdate({
-            taskId: pending.taskId,
+            taskId: pendingTaskId,
             commandId: cmd.id,
             chatId: cmd.chatId,
             type: "progress",
@@ -3947,69 +3958,29 @@ async function startMessagingBridge() {
           }).catch(() => {});
         }
 
+        let result;
         try {
-          const store = getTaskStore();
-          const planTask = store.get(pending.taskId);
-          if (!planTask?.pendingExecutionPlan) {
-            await messagingBridge?.replyToCommand(cmd.id, "Plan no longer available. Please send a new task.");
-            return;
-          }
-          // Inline the plan execution (same as approvePlan IPC handler)
-          const approvePayload = {
-            taskId: pending.taskId,
+          result = await executeApprovedPlan({
+            taskId: pendingTaskId,
             conversationId: pending.conversationId
-          };
-          // Trigger via internal IPC equivalent — reuse the ipcMain handler
-          const approveResult = await (async () => {
-            const { taskId, conversationId } = approvePayload;
-            const taskStore2 = getTaskStore();
-            const conversationStoreRef = getConversationStore();
-            const memoryStoreRef = getMemoryStore();
-            const planTask2 = taskStore2.get(taskId);
-            const rawPlan = planTask2?.pendingExecutionPlan;
-            const normalized = normalizeExecutionPlan(rawPlan);
-            if (!normalized?.phases?.length) return { error: "No pending plan." };
-            const session = conversationStoreRef.getSession(conversationId);
-            if (!session) return { error: "Conversation not found." };
-            // Mark as running
-            taskStore2.update(taskId, {
-              pendingExecutionPlan: null,
-              status: TASK_STATUS.RUNNING,
-              progress: { current: 0, total: normalized.phases.length, message: "Workflow approved via Telegram." }
-            });
-            await taskStore2.save();
-            // Re-run using the approval IPC handler logic directly
-            // (This calls the same internal function that the desktop UI uses)
-            return { taskId, conversationId, approved: true };
-          })();
-
-          if (approveResult?.error) {
-            await messagingBridge?.replyToCommand(cmd.id, "Error: " + approveResult.error);
-            return;
-          }
-
-          // Now trigger the actual plan execution by calling the registered handler logic
-          // We simulate what ipcMain "assistant:approvePlan" does
-          const approvalResult = await new Promise((resolve) => {
-            // Use a fake event to call the registered handler
-            const handler = ipcMain._events?.["assistant:approvePlan"]?.[0]
-              ?? ipcMain._events?.["assistant:approvePlan"];
-            if (typeof handler === "function") {
-              handler({}, { taskId: pending.taskId, conversationId: pending.conversationId })
-                .then(resolve).catch(e => resolve({ error: e.message }));
-            } else {
-              // Fallback: import the handler inline
-              resolve({ error: "Cannot invoke approvePlan handler" });
-            }
           });
-
-          if (approvalResult?.error) {
-            await messagingBridge?.replyToCommand(cmd.id, "Plan execution error: " + approvalResult.error);
-          }
-          // The approvePlan handler will call sendTelegramTaskManagerUpdate when done
         } catch (approveErr) {
-          await messagingBridge?.replyToCommand(cmd.id, "Failed to execute plan: " + (approveErr.message ?? String(approveErr)));
+          await messagingBridge?.replyToCommand(
+            cmd.id,
+            "Failed to execute plan: " + (approveErr?.message ?? String(approveErr))
+          );
+          return;
         }
+
+        if (result?.error) {
+          await messagingBridge?.replyToCommand(cmd.id, "Plan execution error: " + result.error);
+          return;
+        }
+
+        // Success — drop the pending entry only after the plan actually ran
+        // (so repeated /approve taps remain idempotent on the "no pending"
+        // branch rather than silently doing nothing).
+        pendingTelegramPlans.delete(pendingTaskId);
         return;
       }
       // ── End plan approval ───────────────────────────────────────────────────
@@ -4040,10 +4011,10 @@ async function startMessagingBridge() {
           }
         );
         if (summary?.pendingApproval && summary?.taskId && summary?.conversationId) {
-          // Store pending plan keyed by chatId so /approve can resume it
-          pendingTelegramPlans.set(cmd.chatId, {
-            taskId: summary.taskId,
-            conversationId: summary.conversationId
+          // Store pending plan keyed by taskId, with chatId for authorization.
+          pendingTelegramPlans.set(summary.taskId, {
+            conversationId: summary.conversationId,
+            chatId: cmd.chatId
           });
           // Build plan preview text
           const planSummary = summary?.content
