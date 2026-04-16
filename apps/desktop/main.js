@@ -29,6 +29,7 @@ import {
 } from "@wcjr/tool-loop";
 import { loadSkills, getSkill, listSkills, findSkillByTrigger } from "@wcjr/skills";
 import { configureLogger, createLogger } from "@wcjr/logger";
+import { loadWorkspaceFor } from "@wcjr/workspace";
 import { buildTelegramManagerFallback, buildTelegramManagerText } from "./telegram-manager.js";
 import {
   buildBootstrapState,
@@ -2594,17 +2595,68 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
     conversationId: z.string().optional(),
     executionMode: z.enum(["plan_first", "direct"]).optional()
   });
-  const {
-    prompt: rawPrompt,
-    taskType,
-    modelOverride,
-    runMode,
-    conversationId,
-    executionMode
-  } = schema.parse(payload);
+  const parsed = schema.parse(payload);
+  const rawPrompt = parsed.prompt;
+  const taskType = parsed.taskType;
+  const runMode = parsed.runMode;
+  const conversationId = parsed.conversationId;
+  const executionMode = parsed.executionMode;
+  let modelOverride = parsed.modelOverride;
   const remoteOrigin = runtime.remoteOrigin ?? null;
   const policyApproved = runtime.policyApproved === true;
-  const { skillId, prompt } = parseSkillCommand(rawPrompt);
+  const parsedCommand = parseSkillCommand(rawPrompt);
+  const skillId = parsedCommand.skillId;
+  let prompt = parsedCommand.prompt;
+  let activeWorkspace = null;
+
+  // Workspace discovery: if the prompt references a path, walk upward for a
+  // `.wcjr/config.json` and adopt its per-workspace settings for this run.
+  // We inject the workspace context block into the final prompt so both the
+  // orchestrator and every downstream model see the same workspace header,
+  // and honour a workspace-level defaultModel when the caller didn't pick
+  // one explicitly.
+  const workspacePathHints = extractPromptPathHints(prompt);
+  if (workspacePathHints.length > 0) {
+    try {
+      const workspace = await loadWorkspaceFor(workspacePathHints[0]);
+      if (workspace) {
+        activeWorkspace = workspace;
+        log.info("workspace detected", {
+          root: workspace.root,
+          name: workspace.config.name,
+          skillRoots: workspace.resolvedSkillRoots.length
+        });
+        prompt = workspace.contextText
+          ? `${workspace.contextText}\n\n---\n\n${prompt}`
+          : prompt;
+        if (!modelOverride && workspace.config.defaultModel) {
+          modelOverride = workspace.config.defaultModel;
+        }
+        // Re-register any workspace-local skill roots. We mutate the global
+        // skillsRegistry in place so the orchestrator (which holds a live
+        // reference) picks them up without a restart. The merge is
+        // last-wins; workspace entries shadow bundled skills of the same id.
+        if (workspace.resolvedSkillRoots.length > 0) {
+          try {
+            const { registry } = await loadSkills([
+              ...skillRootPaths(),
+              ...workspace.resolvedSkillRoots
+            ]);
+            skillsRegistry.clear();
+            for (const [id, skill] of registry.entries()) {
+              skillsRegistry.set(id, skill);
+            }
+          } catch (err) {
+            log.warn("workspace skill reload failed", {
+              err: err?.message ?? String(err)
+            });
+          }
+        }
+      }
+    } catch (err) {
+      log.warn("workspace discovery failed", { err: err?.message ?? String(err) });
+    }
+  }
   const planExecutionMode = executionMode ?? appConfig.executionMode ?? "direct";
   appConfig.executionMode = planExecutionMode;
   await saveConfig();

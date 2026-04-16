@@ -35,6 +35,7 @@
     "@wcjr/rag": "0.1.0",
     "@wcjr/skills": "0.1.0",
     "@wcjr/task-store": "0.1.0",
+    "@wcjr/workspace": "0.1.0",
     "@wcjr/xlsx-engine-mcp": "0.1.0",
     "@qdrant/js-client-rest": "^1.17.0",
     "openai": "^4.96.0",
