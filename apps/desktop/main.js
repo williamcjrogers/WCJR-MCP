@@ -4030,6 +4030,37 @@ async function startMessagingBridge() {
 // ── Webhook HTTP server for WhatsApp (WAHA) and n8n triggers ───────────────
 let webhookServer = null;
 
+// Auth helper — returns true if the request is authorised, and writes the
+// appropriate error response if not. Keep in sync with /api/n8n/trigger.
+function authoriseWebhookRequest(req, res) {
+  const expectedToken =
+    appConfig?.webhookAuthToken ??
+    process.env.WCJR_WEBHOOK_TOKEN ??
+    null;
+  if (!expectedToken) {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        ok: false,
+        error:
+          "Webhook auth token not configured. Set appConfig.webhookAuthToken or WCJR_WEBHOOK_TOKEN env var."
+      })
+    );
+    return false;
+  }
+  const authHeader = req.headers["authorization"] ?? "";
+  if (
+    typeof authHeader !== "string" ||
+    !authHeader.startsWith("Bearer ") ||
+    authHeader.slice(7).trim() !== expectedToken
+  ) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "invalid or missing bearer token" }));
+    return false;
+  }
+  return true;
+}
+
 function startWebhookServer() {
   const messaging = appConfig?.messaging ?? {};
   const isWhatsApp = messaging.enabled && messaging.channel === "whatsapp";
@@ -4037,6 +4068,10 @@ function startWebhookServer() {
 
   // Always start — serves MCP tool API for n8n, WhatsApp webhooks, and health check
   const port = parseInt(process.env.APP_PORT ?? "4000", 10);
+  // Bind to loopback by default so the unauthenticated /health endpoint and
+  // the authenticated MCP endpoints are not reachable from the LAN. Advanced
+  // users can override with WCJR_WEBHOOK_HOST (e.g. for remote WAHA).
+  const host = process.env.WCJR_WEBHOOK_HOST ?? "127.0.0.1";
 
   webhookServer = http.createServer((req, res) => {
     let body = [];
@@ -4072,29 +4107,7 @@ function startWebhookServer() {
 
       // --- n8n trigger (L3a: server-side spawn + bearer token auth) ---
       if (req.method === "POST" && req.url === "/api/n8n/trigger") {
-        // Bearer token auth — required
-        const expectedToken =
-          appConfig?.webhookAuthToken ??
-          process.env.WCJR_WEBHOOK_TOKEN ??
-          null;
-        if (!expectedToken) {
-          res.writeHead(503, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            ok: false,
-            error: "Webhook auth token not configured. Set appConfig.webhookAuthToken or WCJR_WEBHOOK_TOKEN env var."
-          }));
-          return;
-        }
-        const authHeader = req.headers["authorization"] ?? "";
-        if (
-          typeof authHeader !== "string" ||
-          !authHeader.startsWith("Bearer ") ||
-          authHeader.slice(7).trim() !== expectedToken
-        ) {
-          res.writeHead(401, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: false, error: "invalid or missing bearer token" }));
-          return;
-        }
+        if (!authoriseWebhookRequest(req, res)) return;
 
         // Parse payload
         let parsed;
@@ -4203,6 +4216,7 @@ function startWebhookServer() {
 
       // --- MCP tools listing (for n8n MCP Client Tool) ---
       if (req.method === "GET" && req.url === "/api/mcp/tools") {
+        if (!authoriseWebhookRequest(req, res)) return;
         try {
           const summary = orchestrator?.mcpHub?.getToolSummary?.() ?? [];
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -4216,6 +4230,7 @@ function startWebhookServer() {
 
       // --- MCP tool call (for n8n MCP Client Tool) ---
       if (req.method === "POST" && req.url === "/api/mcp/call") {
+        if (!authoriseWebhookRequest(req, res)) return;
         let parsed;
         try {
           parsed = JSON.parse(rawBody.toString());
@@ -4228,6 +4243,26 @@ function startWebhookServer() {
         if (!server || !tool) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Missing server or tool" }));
+          return;
+        }
+        // Route every remote tool call through the policy engine. The remote
+        // caller has no UI to confirm, so "confirm" verdicts are denied — the
+        // operator must relax their policy or add the target to the approved
+        // list before this endpoint will run sensitive tools.
+        const policyVerdict = evaluateToolPolicy({
+          serverName: server,
+          toolName: tool,
+          args: args ?? {},
+          policyApproved: false
+        });
+        if (policyVerdict.decision !== "allow") {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: policyVerdict.message || "Denied by policy",
+              policy: policyVerdict.policy
+            })
+          );
           return;
         }
         try {
@@ -4253,8 +4288,8 @@ function startWebhookServer() {
     });
   });
 
-  webhookServer.listen(port, () => {
-    logStartup(`Webhook HTTP server listening on port ${port}`);
+  webhookServer.listen(port, host, () => {
+    logStartup(`Webhook HTTP server listening on ${host}:${port}`);
   });
   webhookServer.on("error", (err) => {
     logStartup("Webhook server failed to start", err);
