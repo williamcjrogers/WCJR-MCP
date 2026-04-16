@@ -1643,6 +1643,8 @@ export class Orchestrator {
         workspaceDir,
         invokeModel: this.options.invokeModel,
         resolveProvider: this.options.resolveProvider,
+        modelRouter: this.modelRouter,
+        modelTiers: this.config?.modelTiers,
         hasApiKey: hasKeySync,
         getCriticModel: () =>
           criticModelId && criticProvider

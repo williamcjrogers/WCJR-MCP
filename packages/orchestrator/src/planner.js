@@ -2,6 +2,7 @@
 import { runCritic } from "./critic.js";
 import { extractArtifactsFromPhase as defaultExtractArtifacts, mergeArtifactHistory } from "./artifact-extractor.js";
 import { buildExecutionBatches } from "./workflow.js";
+import { resolveModelForPhase, DEFAULT_MODEL_TIERS } from "@wcjr/model-router";
 
 function summarizePlan(phases, currentIndex) {
   return phases
@@ -158,7 +159,21 @@ async function runPhase(phase, ctx) {
     phaseEntry.attempts = attempt + 1;
     emitStatus?.(`Running phase ${phaseNum}/${totalPhases}: ${phase.title ?? phase.prompt}...`);
 
-    const phaseModel = phase.modelOverride ?? executorModel ?? "gpt-5.4";
+    // Prefer an explicit override on the phase, then the tiered router (so
+    // phase.depth actually drives the model), then the plan-wide executor
+    // model, then the fictional default. Never hit the gpt-5.4 branch in
+    // practice — it's a last-ditch fallback for badly-migrated configs.
+    const routedModel = ctx.modelRouter
+      ? resolveModelForPhase({
+          activityId: phase.activity ?? taskType,
+          depth: phase.depth ?? "standard",
+          explicitModel: phase.modelOverride ?? phase.model,
+          uiOverride: executorModel,
+          modelRouter: ctx.modelRouter,
+          modelTiers: ctx.modelTiers ?? DEFAULT_MODEL_TIERS
+        })
+      : null;
+    const phaseModel = routedModel ?? phase.modelOverride ?? executorModel ?? "gpt-5.4";
     const providerId = resolveProvider?.(phaseModel) ?? "openai";
     phaseEntry.executorModel = phaseModel;
 
@@ -316,7 +331,9 @@ export async function runIterativePlan({
   budget,
   systemMessage,
   conversationMessages,
-  enrichedPrompt
+  enrichedPrompt,
+  modelRouter,
+  modelTiers
 }) {
   const startedAt = Date.now();
   const extractArtifactsFn = extractArtifacts ?? defaultExtractArtifacts;
@@ -451,6 +468,8 @@ export async function runIterativePlan({
         systemMessage,
         conversationMessages,
         priorPhaseSnapshot,
+        modelRouter,
+        modelTiers,
         runId: plan.taskId ?? "adhoc",
         batchIndex,
         batchSize: budgetedPhases.length,

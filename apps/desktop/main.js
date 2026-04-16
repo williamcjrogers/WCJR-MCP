@@ -14,7 +14,7 @@ import {
   getMcpPresetDefinitions,
   resolveSkillDefinition
 } from "@wcjr/activity-profiles";
-import { PROVIDERS, PROVIDER_IDS, getAdapter, resolveProvider } from "@wcjr/providers";
+import { PROVIDERS, PROVIDER_IDS, getAdapter, resolveProvider, registerModels } from "@wcjr/providers";
 import { Orchestrator, normalizeExecutionPlan, buildExecutionBatches } from "@wcjr/orchestrator";
 import { resolveModelForPhase, DEFAULT_MODEL_TIERS } from "@wcjr/model-router";
 import { TaskStore, TASK_STATUS } from "@wcjr/task-store";
@@ -3156,6 +3156,10 @@ function registerIpcHandlers() {
         const models = sanitizeModelList(await adapter.listModels(apiKey));
         if (!appConfig.modelCache) appConfig.modelCache = {};
         appConfig.modelCache[providerId] = models;
+        // Seed the runtime model registry so resolveProvider returns the
+        // right provider for this id in future calls (instead of falling
+        // through to the prefix heuristic and potentially forcing openai).
+        registerModels(models.map((m) => ({ modelId: m.id, providerId, displayName: m.name })));
         results[providerId] = { models };
       } catch (err) {
         logStartup(`listModels failed for ${providerId}: ${err.message}`);
@@ -4444,6 +4448,13 @@ if (gotSingleInstanceLock) {
     appConfig = await loadConfig();
     await migrateMailCalendarConfig();
     await saveConfig();
+    // Seed the runtime model registry from whatever the user last cached so
+    // resolveProvider returns accurate providers immediately (no need to wait
+    // for the first "Refresh Models" click).
+    for (const [providerId, models] of Object.entries(appConfig.modelCache ?? {})) {
+      if (!Array.isArray(models)) continue;
+      registerModels(models.map((m) => ({ modelId: m.id, providerId, displayName: m.name })));
+    }
     taskStore = getTaskStore();
     await taskStore.load();
     conversationStore = getConversationStore();
