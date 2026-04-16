@@ -30,17 +30,19 @@ test("parseVerdict accepts valid accept verdict", () => {
   assert.equal(verdict._parseError, undefined);
 });
 
-test("parseVerdict returns degraded accept for malformed JSON", () => {
+test("parseVerdict returns a degraded verdict for malformed JSON", () => {
   const verdict = parseVerdict("this is not json at all");
-  assert.equal(verdict.decision, "accept");
+  // The planner treats 'degraded' as 'pass through but tag the ledger' so the
+  // caller can still see that the critic never actually vouched for the phase.
+  assert.equal(verdict.decision, "degraded");
   assert.equal(verdict.confidence, 0);
   assert.equal(verdict._parseError, true);
 });
 
-test("parseVerdict rejects unknown decision values", () => {
+test("parseVerdict rejects unknown decision values with a degraded verdict", () => {
   const raw = JSON.stringify({ decision: "destroy", reasoning: "test", confidence: 1 });
   const verdict = parseVerdict(raw);
-  assert.equal(verdict.decision, "accept");
+  assert.equal(verdict.decision, "degraded");
   assert.equal(verdict._parseError, true);
 });
 
@@ -51,7 +53,7 @@ test("VERDICT_SCHEMA_DECISIONS contains all four valid decisions", () => {
   );
 });
 
-test("runCritic degrades to accept when invokeModel throws", async () => {
+test("runCritic returns a degraded verdict when invokeModel throws", async () => {
   const verdict = await runCritic({
     invokeModel: async () => { throw new Error("network timeout"); },
     criticModel: "test-model",
@@ -63,11 +65,11 @@ test("runCritic degrades to accept when invokeModel throws", async () => {
     phaseIntent: "intent",
     phaseResult: "result"
   });
-  assert.equal(verdict.decision, "accept");
+  assert.equal(verdict.decision, "degraded");
   assert.equal(verdict._parseError, true);
 });
 
-test("runCritic handles invokeModel returning undefined content", async () => {
+test("runCritic returns a degraded verdict when invokeModel returns undefined content", async () => {
   const verdict = await runCritic({
     invokeModel: async () => ({ content: undefined }),
     criticModel: "test-model",
@@ -79,7 +81,7 @@ test("runCritic handles invokeModel returning undefined content", async () => {
     phaseIntent: "intent",
     phaseResult: "result"
   });
-  assert.equal(verdict.decision, "accept");
+  assert.equal(verdict.decision, "degraded");
   assert.equal(verdict._parseError, true);
 });
 
