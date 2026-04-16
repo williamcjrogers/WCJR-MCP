@@ -1,7 +1,14 @@
 {
   "appId": "com.wcjr.assistant",
   "productName": "WCJR Assistant",
-  "asar": false,
+  "asar": true,
+  "asarUnpack": [
+    "packages/**/src/server.js",
+    "packages/**/server.js",
+    "skills/**",
+    "node_modules/@modelcontextprotocol/**",
+    "node_modules/tesseract.js*/**"
+  ],
   "icon": "build/icon.png",
   "directories": {
     "output": "release"
