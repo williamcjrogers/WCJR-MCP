@@ -18,7 +18,16 @@ function normalizeTextContent(value) {
 
 /**
  * Convert the app's internal message format to Responses API input format.
- * The Responses API uses a different message structure than Chat Completions.
+ *
+ * The Responses API expects a mix of message items and structured
+ * `function_call` / `function_call_output` items — it does NOT accept tool
+ * results smuggled into user text. Getting this wrong silently breaks
+ * multi-round tool calling on gpt-5-pro / o3 / o4 / grok-multi-agent.
+ *
+ * Shapes (current OpenAI Responses API):
+ *   { type: "message", role, content: [{type:"input_text"|"output_text", text}] }
+ *   { type: "function_call", call_id, name, arguments }
+ *   { type: "function_call_output", call_id, output }
  */
 function toResponsesInput(messages) {
   const input = [];
@@ -30,23 +39,52 @@ function toResponsesInput(messages) {
         role: "system",
         content: normalizeTextContent(msg.content)
       });
-    } else if (msg.role === "user") {
+      continue;
+    }
+
+    if (msg.role === "user") {
       input.push({
         role: "user",
         content: normalizeTextContent(msg.content)
       });
-    } else if (msg.role === "assistant" || msg.role === "tool_call") {
+      continue;
+    }
+
+    if (msg.role === "tool_call") {
+      // The assistant previously emitted tool calls. Replay each call as a
+      // structured function_call item so the model can link the matching
+      // function_call_output to it by call_id.
+      const text = normalizeTextContent(msg.content);
+      if (text) {
+        input.push({ role: "assistant", content: text });
+      }
+      for (const tc of msg.toolCalls ?? []) {
+        input.push({
+          type: "function_call",
+          call_id: tc.id,
+          name: tc.name ?? "",
+          arguments:
+            typeof tc.args === "string" ? tc.args : JSON.stringify(tc.args ?? {})
+        });
+      }
+      continue;
+    }
+
+    if (msg.role === "assistant") {
       input.push({
         role: "assistant",
         content: normalizeTextContent(msg.content)
       });
-    } else if (msg.role === "tool_result" || msg.role === "tool") {
-      // Tool results in Responses API are handled differently,
-      // but for simple conversion we include as user context
+      continue;
+    }
+
+    if (msg.role === "tool_result" || msg.role === "tool") {
       input.push({
-        role: "user",
-        content: `[Tool result for ${msg.toolCallId ?? "unknown"}]: ${normalizeTextContent(msg.content)}`
+        type: "function_call_output",
+        call_id: msg.toolCallId ?? "unknown",
+        output: normalizeTextContent(msg.content)
       });
+      continue;
     }
   }
   return input;
@@ -108,13 +146,36 @@ export async function openaiResponsesStream({
       }
     }
 
-    // Function call outputs
-    if (event.type === "response.function_call_arguments.done") {
+    // Function call outputs — the Responses API emits `response.output_item.added`
+    // with the full function_call item (including call_id + name) and then one
+    // or more `response.function_call_arguments.delta` events, followed by
+    // `response.function_call_arguments.done` with the complete arguments
+    // string. We capture call_id at `output_item.added` time and fill the
+    // arguments in at `.done` time. `event.name` on the arguments.done event
+    // is deprecated on newer API builds, so we cannot rely on it alone.
+    if (event.type === "response.output_item.added" && event.item?.type === "function_call") {
       toolCalls.push({
-        id: event.item_id ?? `tool_call_${toolCalls.length}`,
-        name: event.name ?? "",
-        args: event.arguments ?? "{}"
+        id: event.item.call_id ?? event.item.id ?? `tool_call_${toolCalls.length}`,
+        name: event.item.name ?? "",
+        args: event.item.arguments ?? ""
       });
+    }
+
+    if (event.type === "response.function_call_arguments.done") {
+      const existing = toolCalls.find(
+        (tc) => tc.id === (event.call_id ?? event.item_id)
+      );
+      if (existing) {
+        existing.args = event.arguments ?? existing.args ?? "{}";
+        if (!existing.name && event.name) existing.name = event.name;
+      } else {
+        // Back-compat: some API builds still only emit `.done` with item_id.
+        toolCalls.push({
+          id: event.call_id ?? event.item_id ?? `tool_call_${toolCalls.length}`,
+          name: event.name ?? "",
+          args: event.arguments ?? "{}"
+        });
+      }
     }
 
     // Usage info
