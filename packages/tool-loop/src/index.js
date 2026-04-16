@@ -37,6 +37,29 @@ export function clearToolNameRegistry() {
   TOOL_NAME_REGISTRY.clear();
 }
 
+const MAX_TRACE_RESULT_BYTES = 64 * 1024;
+
+/**
+ * Capture a bounded copy of an MCP tool's raw result for the trace. Returns
+ * `{ parsed, bytes }` or `null` when the result is too large (we keep the
+ * resultPreview in that case). MCP results are usually small JSON objects;
+ * the cap exists so a large file-extraction result doesn't balloon the trace.
+ */
+function safeStringifyForTrace(rawResult) {
+  if (rawResult == null) return null;
+  try {
+    const json = JSON.stringify(rawResult);
+    if (typeof json !== "string") return null;
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes > MAX_TRACE_RESULT_BYTES) {
+      return null;
+    }
+    return { parsed: JSON.parse(json), bytes };
+  } catch {
+    return null;
+  }
+}
+
 function truncateText(value, maxChars = DEFAULT_SERIALIZED_RESULT_CHARS) {
   const text = String(value ?? "");
   if (text.length <= maxChars) {
@@ -694,6 +717,17 @@ export async function runToolLoop({
         traceEntry.status = "completed";
         traceEntry.durationMs = Date.now() - startedAt;
         traceEntry.resultPreview = truncateText(serializedResult, DEFAULT_TRACE_PREVIEW_CHARS);
+        // Record the raw result object alongside the human-readable preview.
+        // The orchestrator's artifact-extractor reads `entry.result` to pull
+        // tool-declared output paths (PRODUCER_WHITELIST / regex fallback).
+        // Without this, Layer 1 and Layer 2 never fire and artifacts produced
+        // outside the scratch workspace go untracked. Bound by the structured
+        // `rawResultBytes` cap so we do not keep megabytes in memory per call.
+        const rawResultJson = safeStringifyForTrace(rawResult);
+        if (rawResultJson) {
+          traceEntry.result = rawResultJson.parsed;
+          traceEntry.rawResultBytes = rawResultJson.bytes;
+        }
         onChunk?.(
           toToolCallChunk("tool_result", {
             callId: traceEntry.id,
