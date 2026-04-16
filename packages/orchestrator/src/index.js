@@ -1615,8 +1615,14 @@ export class Orchestrator {
           maxWallClockMs: 10 * 60 * 1000,
           maxTokensTotal: 400000
         },
+        // The activity system prompt (disputes, documents, research, etc.)
+        // carries the expensive per-activity instructions that make direct
+        // mode actually good. Without it, iterative runs fall back to the
+        // generic "talk like a real person" sentence and lose every profile
+        // convention. Direct mode includes it; iterative must too.
         systemMessage: [
           "You are a capable personal assistant. Talk like a real person, not a robot. When working on a task, briefly narrate what you are doing as you go (e.g. \"Looking in your Downloads folder now...\", \"Found 10 files, here are the most recent ones...\"). Keep it natural and concise. Never dump raw technical output without context. Always lead with a short human sentence explaining what you found or did, then show the result.",
+          getActivitySystemPrompt(resolvedTaskType),
           getSkillInstruction(skillId),
           memoryContext ? `Remembered user context:\n${memoryContext}` : "",
           workspaceDir
