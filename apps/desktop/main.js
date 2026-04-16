@@ -27,6 +27,7 @@ import {
   mcpToolsToProvider,
   runToolLoop
 } from "@wcjr/tool-loop";
+import { loadSkills, getSkill, listSkills, findSkillByTrigger } from "@wcjr/skills";
 import { buildTelegramManagerFallback, buildTelegramManagerText } from "./telegram-manager.js";
 import {
   buildBootstrapState,
@@ -170,6 +171,9 @@ let memoryStore;
 let policyEngine;
 let messagingBridge;
 let configSaveQueue = Promise.resolve();
+// In-process registry of all loaded skills. Rebuilt from disk at startup and
+// on demand so the orchestrator picks up new SKILL.md files without a restart.
+let skillsRegistry = new Map();
 // taskId (string) → { conversationId, chatId } for plan approval via Telegram.
 // Keyed by taskId (unique per plan) instead of chatId so a user cannot accidentally
 // (or maliciously) approve someone else's plan from the same chat.
@@ -626,7 +630,19 @@ function buildActivityProfileState() {
 }
 
 function parseSkillCommand(prompt) {
-  const match = String(prompt).trim().match(/^\/([a-z0-9-]+)\b/i);
+  const trimmed = String(prompt).trim();
+  // Prefer the live filesystem-backed registry (honours bundled SKILL.md
+  // triggers + user-dropped skills). Fall back to the legacy activity-profiles
+  // registry so the three original slash commands keep working on a cold boot.
+  const viaRegistry = findSkillByTrigger(skillsRegistry, trimmed);
+  if (viaRegistry) {
+    const cleaned = trimmed.replace(new RegExp(`^/${viaRegistry.id}\\b\\s*`, "i"), "").trim();
+    return {
+      skillId: viaRegistry.id,
+      prompt: cleaned || trimmed
+    };
+  }
+  const match = trimmed.match(/^\/([a-z0-9-]+)\b/i);
   if (!match) {
     return { skillId: null, prompt };
   }
@@ -635,7 +651,7 @@ function parseSkillCommand(prompt) {
   if (!skill) {
     return { skillId: null, prompt };
   }
-  const cleanedPrompt = String(prompt).replace(/^\/[a-z0-9-]+\b\s*/i, "").trim();
+  const cleanedPrompt = trimmed.replace(/^\/[a-z0-9-]+\b\s*/i, "").trim();
   return {
     skillId: skill.id,
     prompt: cleanedPrompt || prompt
@@ -2394,6 +2410,9 @@ function createOrchestrator(runsDir) {
     runsDir,
     taskStore: getTaskStore(),
     memoryStore: getMemoryStore(),
+    // Share the live skills registry so getSkillInstruction picks up real
+    // SKILL.md bodies before falling back to the legacy three-string switch.
+    skillRegistry: skillsRegistry,
     emitStatus: (text) => {
       emitStream({ type: "status", text: `${text}\n\n` });
       emitProgressDetail(parseStatusToDetail(text));
@@ -2402,6 +2421,48 @@ function createOrchestrator(runsDir) {
     detectSandboxStatus,
     runSandboxedTask
   });
+}
+
+function skillRootPaths() {
+  const roots = [];
+  // Bundled skills shipped alongside the app.
+  if (app.isPackaged) {
+    roots.push(path.join(process.resourcesPath, "skills"));
+  } else {
+    roots.push(path.resolve(__dirname, "..", "..", "skills"));
+  }
+  // User-installed skills — dropped into the app's userData folder.
+  roots.push(path.join(app.getPath("userData"), "skills"));
+  // Additional roots configured in appConfig.skillRoots (absolute paths only).
+  if (Array.isArray(appConfig?.skillRoots)) {
+    for (const root of appConfig.skillRoots) {
+      if (typeof root === "string" && path.isAbsolute(root)) {
+        roots.push(root);
+      }
+    }
+  }
+  return roots;
+}
+
+async function reloadSkills() {
+  try {
+    const { registry, diagnostics } = await loadSkills(skillRootPaths());
+    skillsRegistry.clear();
+    for (const [id, skill] of registry.entries()) {
+      skillsRegistry.set(id, skill);
+    }
+    if (diagnostics?.length) {
+      for (const diag of diagnostics) {
+        if (diag.level === "error") {
+          logStartup(`[skills] ${diag.file}: ${diag.message}`);
+        }
+      }
+    }
+    return { count: skillsRegistry.size, diagnostics };
+  } catch (err) {
+    logStartup("[skills] load failed", err);
+    return { count: 0, diagnostics: [], error: err?.message ?? String(err) };
+  }
 }
 
 function getTaskStore() {
@@ -3706,6 +3767,43 @@ function registerIpcHandlers() {
     return store.getAuditTrail(filters ?? { limit: 100 });
   });
 
+  ipcMain.handle("assistant:getSkills", async (_event, filters = {}) => {
+    const includeInternal = filters?.includeInternal !== false;
+    const visible = listSkills(skillsRegistry, { includeInternal });
+    return visible.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      triggers: skill.triggers,
+      tags: skill.tags,
+      internalOnly: skill.internalOnly,
+      version: skill.version
+    }));
+  });
+
+  ipcMain.handle("assistant:getSkill", async (_event, skillId) => {
+    if (typeof skillId !== "string" || !skillId.trim()) return null;
+    const skill = getSkill(skillsRegistry, skillId);
+    if (!skill) return null;
+    return {
+      id: skill.id,
+      name: skill.name,
+      description: skill.description,
+      triggers: skill.triggers,
+      tags: skill.tags,
+      allowedTools: skill.allowedTools,
+      internalOnly: skill.internalOnly,
+      version: skill.version,
+      body: skill.body,
+      sourcePath: skill.sourcePath ?? null
+    };
+  });
+
+  ipcMain.handle("assistant:reloadSkills", async () => {
+    const summary = await reloadSkills();
+    return { count: summary.count, diagnostics: summary.diagnostics ?? [] };
+  });
+
   ipcMain.handle("assistant:getPolicy", async () => {
     const engine = getPolicyEngine();
     return {
@@ -4357,6 +4455,10 @@ if (gotSingleInstanceLock) {
     } catch (err) {
       logStartup("failed to create runs dir", err);
     }
+    // Load skills BEFORE constructing the orchestrator so the live registry
+    // reference passed into options is already populated on first run.
+    const skillsSummary = await reloadSkills();
+    logStartup(`[skills] loaded ${skillsSummary?.count ?? 0} skill(s)`);
     createOrchestrator(runsDir);
     await orchestrator.connectMcp();
     orchestrator.startMcpHealthChecks();

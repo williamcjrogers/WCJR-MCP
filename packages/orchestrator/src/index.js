@@ -411,8 +411,20 @@ function matchesPreset(serverContext, preset) {
   return (preset.serverNamePatterns ?? []).every((pattern) => haystack.includes(pattern.toLowerCase()));
 }
 
-function getSkillInstruction(skillId) {
-  const skill = skillId ? resolveSkillDefinition(skillId) : null;
+/**
+ * Resolve the system-prompt body for a skill id. Prefers the filesystem-backed
+ * registry (real SKILL.md bodies) so new skills dropped into <userData>/skills/
+ * or the bundled skills/ directory take effect without a code change. Falls
+ * back to a small set of hardcoded strings for the three legacy ids so existing
+ * installs keep working while their registry warms up.
+ */
+function getSkillInstruction(skillId, skillRegistry) {
+  if (!skillId) return "";
+  if (skillRegistry && typeof skillRegistry.get === "function") {
+    const entry = skillRegistry.get(skillId);
+    if (entry?.body) return entry.body;
+  }
+  const skill = resolveSkillDefinition(skillId);
   if (!skill) return "";
   switch (skill.id) {
     case "brainstorming":
@@ -1217,7 +1229,7 @@ export class Orchestrator {
     );
     const systemMessage = [
       ORCHESTRATOR_PLAN_SYSTEM,
-      getSkillInstruction(skillId),
+      getSkillInstruction(skillId, this.options.skillRegistry),
       memoryContext
         ? `Remembered user context:\n${memoryContext}\nUse these memories only when they are relevant.`
         : ""
@@ -1487,7 +1499,7 @@ export class Orchestrator {
     );
     const systemMessage = [
       "You are a capable personal assistant. Talk like a real person, not a robot. When working on a task, briefly narrate what you are doing as you go (e.g. \"Looking in your Downloads folder now...\", \"Found 10 files, here are the most recent ones...\"). Keep it natural and concise. Never dump raw technical output without context. Always lead with a short human sentence explaining what you found or did, then show the result.",
-      getSkillInstruction(skillId),
+      getSkillInstruction(skillId, this.options.skillRegistry),
       memoryContext
         ? `Remembered user context:\n${memoryContext}\nUse these memories only when they are relevant, and ask for clarification if uncertain.`
         : ""
@@ -1524,7 +1536,7 @@ export class Orchestrator {
       try {
         const sandboxPrompt = sanitizedConversationMessages.length
           ? [
-              getSkillInstruction(skillId) ? `${getSkillInstruction(skillId)}\n` : "",
+              getSkillInstruction(skillId, this.options.skillRegistry) ? `${getSkillInstruction(skillId, this.options.skillRegistry)}\n` : "",
               memoryContext ? `Remembered user context:\n${memoryContext}\n` : "",
               "Conversation so far:",
               ...sanitizedConversationMessages.map((message) =>
@@ -1533,7 +1545,7 @@ export class Orchestrator {
               "",
               `Latest user message: ${enrichedPrompt}`
             ].join("\n")
-          : [getSkillInstruction(skillId), enrichedPrompt].filter(Boolean).join("\n\n");
+          : [getSkillInstruction(skillId, this.options.skillRegistry), enrichedPrompt].filter(Boolean).join("\n\n");
         const result = await this.options.runSandboxedTask({
           prompt: sandboxPrompt,
           taskType: resolvedTaskType,
@@ -1658,7 +1670,7 @@ export class Orchestrator {
         systemMessage: [
           "You are a capable personal assistant. Talk like a real person, not a robot. When working on a task, briefly narrate what you are doing as you go (e.g. \"Looking in your Downloads folder now...\", \"Found 10 files, here are the most recent ones...\"). Keep it natural and concise. Never dump raw technical output without context. Always lead with a short human sentence explaining what you found or did, then show the result.",
           getActivitySystemPrompt(resolvedTaskType),
-          getSkillInstruction(skillId),
+          getSkillInstruction(skillId, this.options.skillRegistry),
           memoryContext ? `Remembered user context:\n${memoryContext}` : "",
           workspaceDir
             ? `Your scratch workspace for this run is at ${workspaceDir}. Save intermediate files there by default, for example ${workspaceDir}${path.sep}matter-summary.xlsx, unless the user specified a specific location.`

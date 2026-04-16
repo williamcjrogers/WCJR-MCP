@@ -81,5 +81,8 @@ contextBridge.exposeInMainWorld("assistantApi", {
   getKnowledgeCollections: () => ipcRenderer.invoke("assistant:getKnowledgeCollections"),
   ingestToKnowledge: (payload) => ipcRenderer.invoke("assistant:ingestToKnowledge", payload),
   deleteFromKnowledge: (payload) => ipcRenderer.invoke("assistant:deleteFromKnowledge", payload),
+  getSkills: (filters) => ipcRenderer.invoke("assistant:getSkills", filters),
+  getSkill: (skillId) => ipcRenderer.invoke("assistant:getSkill", skillId),
+  reloadSkills: () => ipcRenderer.invoke("assistant:reloadSkills"),
   revealArtifact: (absolutePath) => ipcRenderer.invoke("shell:revealArtifact", absolutePath)
 });
