@@ -38,6 +38,10 @@ const DEFAULT_TASK = {
   toolTrace: [],
   artifacts: [],
   audit: [],
+  // Ambient scheduling (optional): when non-null the task is a recurring
+  // template rather than a one-shot run. The scheduler polls for templates
+  // whose nextRunAt is due and spawns a fresh child task per execution.
+  schedule: null,
   createdAt: null,
   updatedAt: null,
   completedAt: null
@@ -49,8 +53,24 @@ export const TASK_STATUS = {
   AWAITING_APPROVAL: "awaiting_approval",
   COMPLETED: "completed",
   FAILED: "failed",
-  CANCELLED: "cancelled"
+  CANCELLED: "cancelled",
+  SCHEDULED: "scheduled"
 };
+
+/**
+ * Given the current time, return the next time a schedule should fire.
+ * Interval schedules are straightforward (nextRunAt = now + intervalMs).
+ * Anything richer (cron, calendar) would live here in future revisions —
+ * kept deliberately tiny for now so the worker loop has one shape to handle.
+ */
+export function computeNextRunAt(schedule, now = new Date()) {
+  if (!schedule || schedule.enabled === false) return null;
+  if (schedule.type === "interval" && Number.isFinite(schedule.intervalMs)) {
+    const base = now instanceof Date ? now : new Date(now);
+    return new Date(base.getTime() + schedule.intervalMs).toISOString();
+  }
+  return null;
+}
 
 /**
  * In-memory task store with optional persistence.

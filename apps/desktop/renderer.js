@@ -3506,6 +3506,112 @@ if (skillsFormEls.cancel) {
   skillsFormEls.cancel.addEventListener("click", () => toggleSkillForm(false));
 }
 
+// ═══════════════════════════════════════════════════════════
+// Scheduled tasks (ambient jobs)
+// ═══════════════════════════════════════════════════════════
+const schedulerEls = {
+  prompt: document.getElementById("scheduled-prompt"),
+  interval: document.getElementById("scheduled-interval"),
+  submit: document.getElementById("btn-schedule-task"),
+  list: document.getElementById("scheduled-tasks-list"),
+  settingsTabBtn: document.querySelector('.tab-btn[data-tab="settings"]')
+};
+
+function renderScheduledTasks(tasks) {
+  if (!schedulerEls.list) return;
+  if (!tasks.length) {
+    schedulerEls.list.innerHTML = '<p class="hint">No scheduled tasks yet.</p>';
+    return;
+  }
+  schedulerEls.list.innerHTML = "";
+  for (const task of tasks) {
+    const schedule = task.schedule ?? {};
+    const nextRunAt = schedule.nextRunAt
+      ? new Date(schedule.nextRunAt).toLocaleString()
+      : "(paused)";
+    const intervalMin = schedule.intervalMs ? Math.round(schedule.intervalMs / 60000) : "?";
+    const item = document.createElement("div");
+    item.className = `scheduled-task-item ${schedule.enabled === false ? "disabled" : ""}`;
+    item.innerHTML = `
+      <div>
+        <div class="scheduled-task-prompt" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt)}</div>
+        <div class="scheduled-task-meta">every ${escapeHtml(String(intervalMin))}m · next ${escapeHtml(nextRunAt)}</div>
+      </div>
+      <button type="button" class="btn secondary btn-scheduled-run" data-id="${escapeHtml(task.id)}">Run now</button>
+      <button type="button" class="btn secondary btn-scheduled-toggle" data-id="${escapeHtml(task.id)}">${schedule.enabled === false ? "Enable" : "Pause"}</button>
+      <button type="button" class="btn secondary btn-scheduled-delete" data-id="${escapeHtml(task.id)}">Delete</button>
+    `;
+    schedulerEls.list.appendChild(item);
+  }
+}
+
+async function refreshScheduledTasks() {
+  if (!api?.listScheduledTasks) return;
+  try {
+    const tasks = await api.listScheduledTasks();
+    renderScheduledTasks(Array.isArray(tasks) ? tasks : []);
+  } catch (err) {
+    if (schedulerEls.list) {
+      schedulerEls.list.innerHTML = `<p class="hint">Failed to load scheduled tasks: ${escapeHtml(err?.message ?? String(err))}</p>`;
+    }
+  }
+}
+
+if (schedulerEls.settingsTabBtn) {
+  schedulerEls.settingsTabBtn.addEventListener("click", () => refreshScheduledTasks());
+}
+
+if (schedulerEls.submit) {
+  schedulerEls.submit.addEventListener("click", async () => {
+    if (!api?.createScheduledTask) return;
+    const prompt = (schedulerEls.prompt?.value ?? "").trim();
+    const intervalMinutes = Number(schedulerEls.interval?.value ?? "60");
+    if (!prompt) return;
+    if (!Number.isFinite(intervalMinutes) || intervalMinutes < 1) return;
+    schedulerEls.submit.disabled = true;
+    try {
+      const result = await api.createScheduledTask({ prompt, intervalMinutes });
+      if (result?.error) {
+        alert(`Could not schedule: ${result.error}`);
+      } else {
+        schedulerEls.prompt.value = "";
+        await refreshScheduledTasks();
+      }
+    } finally {
+      schedulerEls.submit.disabled = false;
+    }
+  });
+}
+
+document.addEventListener("click", async (event) => {
+  const target = event.target?.closest?.(".btn-scheduled-run, .btn-scheduled-toggle, .btn-scheduled-delete");
+  if (!target) return;
+  const taskId = target.dataset.id;
+  if (!taskId || !api) return;
+  event.preventDefault();
+  event.stopPropagation();
+  try {
+    if (target.classList.contains("btn-scheduled-run")) {
+      await api.runScheduledTaskNow?.(taskId);
+    } else if (target.classList.contains("btn-scheduled-toggle")) {
+      const current = await api.listScheduledTasks?.();
+      const entry = (Array.isArray(current) ? current : []).find((t) => t.id === taskId);
+      const enabled = entry?.schedule?.enabled !== false;
+      await api.setScheduledTaskEnabled?.({ taskId, enabled: !enabled });
+    } else if (target.classList.contains("btn-scheduled-delete")) {
+      if (window.confirm("Delete this scheduled task?")) {
+        await api.deleteScheduledTask?.(taskId);
+      }
+    }
+  } finally {
+    refreshScheduledTasks();
+  }
+});
+
+// Kick one refresh at boot so the list is populated before the user clicks
+// into Settings.
+setTimeout(() => refreshScheduledTasks(), 500);
+
 if (skillsFormEls.form) {
   skillsFormEls.form.addEventListener("submit", async (event) => {
     event.preventDefault();

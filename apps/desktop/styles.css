@@ -1927,3 +1927,31 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
   min-height: 120px;
   resize: vertical;
 }
+
+.scheduled-tasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.scheduled-task-item {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.78rem;
+}
+.scheduled-task-prompt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.scheduled-task-meta {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.scheduled-task-item.disabled .scheduled-task-prompt { color: var(--muted); }

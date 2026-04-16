@@ -17,7 +17,7 @@ import {
 import { PROVIDERS, PROVIDER_IDS, getAdapter, resolveProvider, registerModels } from "@wcjr/providers";
 import { Orchestrator, normalizeExecutionPlan, buildExecutionBatches } from "@wcjr/orchestrator";
 import { resolveModelForPhase, DEFAULT_MODEL_TIERS } from "@wcjr/model-router";
-import { TaskStore, TASK_STATUS } from "@wcjr/task-store";
+import { TaskStore, TASK_STATUS, computeNextRunAt } from "@wcjr/task-store";
 import { ConversationStore } from "@wcjr/conversation-store";
 import { MemoryStore } from "@wcjr/memory-store";
 import { PolicyEngine, POLICY_PROFILES, ACTION_TYPES } from "@wcjr/policy-engine";
@@ -3177,6 +3177,72 @@ async function getWorkspaceStatePayload() {
   });
 }
 
+// ═══════════════════════════════════════════════════════════
+// Ambient scheduler
+//
+// "Scheduled tasks" are task-store records with status: "scheduled" and a
+// schedule descriptor { type: "interval", intervalMs, enabled, nextRunAt }.
+// Every 30s the worker scans for records whose nextRunAt <= now, spawns a
+// one-shot child run via runAssistantTaskRequest, and advances the
+// schedule's nextRunAt.
+// ═══════════════════════════════════════════════════════════
+const SCHEDULER_TICK_MS = 30 * 1000;
+let schedulerIntervalId = null;
+
+async function scheduledTick() {
+  const store = getTaskStore();
+  const now = Date.now();
+  const scheduledTasks = store
+    .list({ limit: 500 })
+    .filter((task) => task?.status === TASK_STATUS.SCHEDULED && task?.schedule?.enabled !== false);
+  for (const template of scheduledTasks) {
+    const nextRunAt = template.schedule?.nextRunAt
+      ? new Date(template.schedule.nextRunAt).getTime()
+      : 0;
+    if (!Number.isFinite(nextRunAt) || nextRunAt > now) continue;
+
+    log.info("ambient schedule firing", {
+      templateId: template.id,
+      intervalMs: template.schedule?.intervalMs
+    });
+
+    const newNextRunAt = computeNextRunAt(template.schedule, new Date(now));
+    store.update(template.id, {
+      schedule: { ...template.schedule, nextRunAt: newNextRunAt, lastRunAt: new Date(now).toISOString() }
+    });
+    await store.save();
+
+    // Fire-and-forget so a slow run doesn't stall the next tick.
+    void runAssistantTaskRequest(
+      {
+        prompt: template.prompt,
+        taskType: template.taskType ?? undefined,
+        runMode: template.runMode ?? "direct"
+      },
+      { remoteOrigin: { channel: "scheduler", templateId: template.id } }
+    ).catch((err) => {
+      log.warn("scheduled run failed", { templateId: template.id, err: err?.message ?? String(err) });
+    });
+  }
+}
+
+function startScheduler() {
+  if (schedulerIntervalId) return;
+  // Kick once on startup to pick up anything whose nextRunAt already passed
+  // while the app was closed, then run on a fixed tick.
+  scheduledTick().catch((err) => log.warn("scheduler tick failed", { err: err?.message ?? err }));
+  schedulerIntervalId = setInterval(() => {
+    scheduledTick().catch((err) => log.warn("scheduler tick failed", { err: err?.message ?? err }));
+  }, SCHEDULER_TICK_MS);
+}
+
+function stopScheduler() {
+  if (schedulerIntervalId) {
+    clearInterval(schedulerIntervalId);
+    schedulerIntervalId = null;
+  }
+}
+
 function registerIpcHandlers() {
   ipcMain.handle("shell:revealArtifact", async (_evt, absolutePath) => {
     if (!absolutePath || typeof absolutePath !== "string") {
@@ -3892,6 +3958,113 @@ function registerIpcHandlers() {
       return { ok: true };
     }
     return { error: "Task not cancellable" };
+  });
+
+  ipcMain.handle("assistant:createScheduledTask", async (_event, payload = {}) => {
+    const schema = z.object({
+      prompt: z.string().min(1),
+      intervalMinutes: z.number().int().positive().max(60 * 24 * 14),
+      taskType: z.string().optional(),
+      runMode: z.enum(["direct", "sandboxed", "iterative"]).optional(),
+      enabled: z.boolean().optional(),
+      firstRunInMinutes: z.number().int().nonnegative().max(60 * 24).optional()
+    });
+    let parsed;
+    try {
+      parsed = schema.parse(payload);
+    } catch (err) {
+      return { error: err?.issues?.[0]?.message ?? err?.message ?? "invalid payload" };
+    }
+    const store = getTaskStore();
+    const intervalMs = parsed.intervalMinutes * 60 * 1000;
+    const firstRunOffsetMs = (parsed.firstRunInMinutes ?? parsed.intervalMinutes) * 60 * 1000;
+    const schedule = {
+      type: "interval",
+      intervalMs,
+      enabled: parsed.enabled !== false,
+      nextRunAt: new Date(Date.now() + firstRunOffsetMs).toISOString(),
+      createdAt: new Date().toISOString(),
+      lastRunAt: null
+    };
+    const template = store.create({
+      prompt: parsed.prompt,
+      taskType: parsed.taskType ?? null,
+      runMode: parsed.runMode ?? "direct"
+    });
+    store.update(template.id, { status: TASK_STATUS.SCHEDULED, schedule });
+    await store.save();
+    log.info("scheduled task created", {
+      id: template.id,
+      intervalMinutes: parsed.intervalMinutes,
+      nextRunAt: schedule.nextRunAt
+    });
+    return { ok: true, task: store.get(template.id) };
+  });
+
+  ipcMain.handle("assistant:listScheduledTasks", async () => {
+    const store = getTaskStore();
+    return store
+      .list({ limit: 200 })
+      .filter((task) => task?.status === TASK_STATUS.SCHEDULED)
+      .sort((a, b) => (a?.schedule?.nextRunAt ?? "").localeCompare(b?.schedule?.nextRunAt ?? ""));
+  });
+
+  ipcMain.handle("assistant:setScheduledTaskEnabled", async (_event, payload = {}) => {
+    const schema = z.object({ taskId: z.string(), enabled: z.boolean() });
+    let parsed;
+    try {
+      parsed = schema.parse(payload);
+    } catch {
+      return { error: "invalid payload" };
+    }
+    const store = getTaskStore();
+    const task = store.get(parsed.taskId);
+    if (!task?.schedule) return { error: "Not a scheduled task" };
+    const schedule = {
+      ...task.schedule,
+      enabled: parsed.enabled,
+      // If we're re-enabling and nextRunAt is in the past, push it forward a
+      // full interval so we don't fire immediately on resume.
+      nextRunAt:
+        parsed.enabled && new Date(task.schedule.nextRunAt).getTime() < Date.now()
+          ? new Date(Date.now() + task.schedule.intervalMs).toISOString()
+          : task.schedule.nextRunAt
+    };
+    store.update(parsed.taskId, { schedule });
+    await store.save();
+    return { ok: true, task: store.get(parsed.taskId) };
+  });
+
+  ipcMain.handle("assistant:deleteScheduledTask", async (_event, taskId) => {
+    if (typeof taskId !== "string" || !taskId.trim()) return { error: "invalid id" };
+    const store = getTaskStore();
+    const task = store.get(taskId);
+    if (!task || task.status !== TASK_STATUS.SCHEDULED) {
+      return { error: "not a scheduled task" };
+    }
+    store.update(taskId, { status: TASK_STATUS.CANCELLED, schedule: null });
+    await store.save();
+    return { ok: true };
+  });
+
+  ipcMain.handle("assistant:runScheduledTaskNow", async (_event, taskId) => {
+    const store = getTaskStore();
+    const template = store.get(taskId);
+    if (!template || template.status !== TASK_STATUS.SCHEDULED) {
+      return { error: "not a scheduled task" };
+    }
+    log.info("scheduled task manual run", { id: taskId });
+    void runAssistantTaskRequest(
+      {
+        prompt: template.prompt,
+        taskType: template.taskType ?? undefined,
+        runMode: template.runMode ?? "direct"
+      },
+      { remoteOrigin: { channel: "scheduler", templateId: template.id, manual: true } }
+    ).catch((err) => {
+      log.warn("manual scheduled run failed", { id: taskId, err: err?.message ?? String(err) });
+    });
+    return { ok: true };
   });
 
   ipcMain.handle("assistant:clearTasks", async () => {
@@ -4816,11 +4989,13 @@ if (gotSingleInstanceLock) {
     createWindow();
     await startMessagingBridge();
     startWebhookServer();
+    startScheduler();
   });
 }
 
 app.on("window-all-closed", () => {
   logStartup("All windows closed");
+  stopScheduler();
   if (orchestrator) {
     orchestrator.stopMcpHealthChecks();
   }

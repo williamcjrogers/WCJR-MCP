@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { TaskStore } from "./index.js";
+import { TaskStore, computeNextRunAt, TASK_STATUS } from "./index.js";
 
 function makeTask(id, updatedAt, extra = {}) {
   return {
@@ -156,4 +156,22 @@ test("TaskStore.listByType respects limit and sorts by updatedAt desc", async ()
   assert.equal(list.length, 1);
   // Second task was updated later, so it comes first
   assert.equal(list[0].id, second.id);
+});
+
+
+test("computeNextRunAt advances by intervalMs for enabled interval schedules", () => {
+  const now = new Date("2026-04-16T12:00:00.000Z");
+  const schedule = { type: "interval", intervalMs: 5 * 60 * 1000, enabled: true };
+  const next = computeNextRunAt(schedule, now);
+  assert.equal(next, "2026-04-16T12:05:00.000Z");
+});
+
+test("computeNextRunAt returns null for disabled or unknown schedule types", () => {
+  assert.equal(computeNextRunAt(null), null);
+  assert.equal(computeNextRunAt({ type: "interval", intervalMs: 1000, enabled: false }), null);
+  assert.equal(computeNextRunAt({ type: "cron", expr: "* * * * *" }), null);
+});
+
+test("TASK_STATUS exposes SCHEDULED", () => {
+  assert.equal(TASK_STATUS.SCHEDULED, "scheduled");
 });

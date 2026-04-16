@@ -88,5 +88,10 @@ contextBridge.exposeInMainWorld("assistantApi", {
   getLogs: (options) => ipcRenderer.invoke("assistant:getLogs", options),
   getRunTrace: (taskId) => ipcRenderer.invoke("assistant:getRunTrace", taskId),
   replayRun: (payload) => ipcRenderer.invoke("assistant:replayRun", payload),
+  createScheduledTask: (payload) => ipcRenderer.invoke("assistant:createScheduledTask", payload),
+  listScheduledTasks: () => ipcRenderer.invoke("assistant:listScheduledTasks"),
+  setScheduledTaskEnabled: (payload) => ipcRenderer.invoke("assistant:setScheduledTaskEnabled", payload),
+  deleteScheduledTask: (taskId) => ipcRenderer.invoke("assistant:deleteScheduledTask", taskId),
+  runScheduledTaskNow: (taskId) => ipcRenderer.invoke("assistant:runScheduledTaskNow", taskId),
   revealArtifact: (absolutePath) => ipcRenderer.invoke("shell:revealArtifact", absolutePath)
 });

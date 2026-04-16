@@ -553,6 +553,21 @@
             </section>
 
             <section class="setup-section">
+              <h2>Scheduled tasks</h2>
+              <p class="hint">Ambient runs — the assistant fires these on a fixed interval. Useful for recurring triage ("summarise my inbox every morning", "check these folders for new files every 2 hours").</p>
+              <div class="row">
+                <input id="scheduled-prompt" class="text-input" type="text" placeholder="Task prompt" />
+              </div>
+              <div class="row">
+                <label>Every</label>
+                <input id="scheduled-interval" class="text-input" type="number" min="5" value="60" />
+                <label>minutes</label>
+                <button id="btn-schedule-task" type="button" class="btn secondary">Schedule</button>
+              </div>
+              <div id="scheduled-tasks-list" class="scheduled-tasks-list"></div>
+            </section>
+
+            <section class="setup-section">
               <h2>Autonomy / Policy</h2>
               <p class="hint">Control when the assistant may act without confirmation.</p>
               <div class="row">
