@@ -802,6 +802,77 @@ async function collectMailResults({
   return results;
 }
 
+async function collectRagResults({ server, mcpHub, prompt, emitStatus, toolActivity }) {
+  // Qdrant-backed RAG. `useRag` is produced by getRetrievalStrategy but was
+  // previously never consumed, so the only way to hit the vector index was
+  // for the model to voluntarily call the RAG tool. We now auto-inject the
+  // top-k chunks for disputes-style profiles before the first turn.
+  if (!server?.name) return [];
+  const tools = server.tools ?? [];
+  const hasKnowledge = tools.includes("knowledge_query");
+  const hasRagSearch = tools.includes("rag_search");
+  if (!hasKnowledge && !hasRagSearch) return [];
+
+  emitStatus?.("Searching case knowledge base...");
+  const toolName = hasKnowledge ? "knowledge_query" : "rag_search";
+  try {
+    const result = await mcpHub.callTool(server.name, toolName, {
+      query: prompt,
+      limit: 8
+    });
+    toolActivity.push({ server: server.name, tool: toolName, detail: `k=8` });
+    const flattened = flattenToolResult(result);
+    const entries = extractRagEntries(flattened, prompt);
+    return entries.slice(0, 8).map((entry, index) => ({
+      source: "rag",
+      title: entry.title ?? `Knowledge chunk ${index + 1}`,
+      locator: entry.locator ?? entry.source ?? `rag:${index}`,
+      snippet: cleanText(entry.snippet ?? entry.content ?? ""),
+      score: typeof entry.score === "number" ? entry.score : 1 - index * 0.05
+    }));
+  } catch (error) {
+    toolActivity.push({
+      server: server.name,
+      tool: toolName,
+      detail: error instanceof Error ? error.message : String(error),
+      status: "error"
+    });
+    return [];
+  }
+}
+
+function extractRagEntries(flattened, prompt) {
+  if (!flattened) return [];
+  // Common shapes the RAG MCP returns: JSON string of `{ results: [...] }`,
+  // or a plain text blob. Try JSON first.
+  try {
+    const parsed = JSON.parse(flattened);
+    const candidates =
+      Array.isArray(parsed?.results) ? parsed.results
+      : Array.isArray(parsed?.hits) ? parsed.hits
+      : Array.isArray(parsed) ? parsed
+      : [];
+    return candidates.map((entry) => ({
+      title: entry?.title ?? entry?.source ?? entry?.payload?.source,
+      locator: entry?.source ?? entry?.payload?.source ?? entry?.id,
+      snippet: entry?.snippet ?? entry?.text ?? entry?.content ?? entry?.payload?.text,
+      score: entry?.score ?? entry?.relevance ?? null
+    }));
+  } catch {
+    // Plain-text fallback: treat the whole blob as a single snippet.
+    const text = String(flattened).trim();
+    if (!text) return [];
+    return [
+      {
+        title: `RAG result for "${prompt.slice(0, 60)}"`,
+        locator: null,
+        snippet: text,
+        score: 0.5
+      }
+    ];
+  }
+}
+
 async function collectBrowserResults({ server, mcpHub, urlHints, toolActivity }) {
   if (!server?.name || !(server.tools ?? []).includes("fetch_page_content")) {
     return [];
@@ -872,12 +943,14 @@ export async function buildRetrievalContext({
   const filesystemServer = serverContexts.find((server) => server.kind === "builtin-filesystem");
   const mailServer = serverContexts.find((server) => server.kind === "builtin-mail-calendar");
   const browserServer = serverContexts.find((server) => server.kind === "builtin-browser-ops");
+  const ragServer = serverContexts.find((server) => server.kind === "builtin-qdrant-rag");
   const lookeenServer = pickLookeenServer(serverContexts);
 
   // Smart retrieval: only run collectors appropriate for the task
   const useFilesystem = strategy.useFilesystem !== false;
   const useMail = strategy.useMail === true;
   const useWeb = strategy.useWeb === true;
+  const useRag = strategy.useRag === true;
   const useLookeen = strategy.useLookeen === true;
 
   const collectors = [
@@ -892,6 +965,9 @@ export async function buildRetrievalContext({
   }
   if (useWeb && !hasExplicitFile) {
     collectors.push(collectBrowserResults({ server: browserServer, mcpHub, urlHints, toolActivity }));
+  }
+  if (useRag) {
+    collectors.push(collectRagResults({ server: ragServer, mcpHub, prompt, emitStatus, toolActivity }));
   }
   if (useLookeen && !hasExplicitFile) {
     collectors.push(collectLookeenResults({ server: lookeenServer, mcpHub, prompt, searchPhrase, promptTokens, emitStatus, toolActivity }));
