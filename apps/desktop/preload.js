@@ -85,5 +85,7 @@ contextBridge.exposeInMainWorld("assistantApi", {
   getSkill: (skillId) => ipcRenderer.invoke("assistant:getSkill", skillId),
   reloadSkills: () => ipcRenderer.invoke("assistant:reloadSkills"),
   getLogs: (options) => ipcRenderer.invoke("assistant:getLogs", options),
+  getRunTrace: (taskId) => ipcRenderer.invoke("assistant:getRunTrace", taskId),
+  replayRun: (payload) => ipcRenderer.invoke("assistant:replayRun", payload),
   revealArtifact: (absolutePath) => ipcRenderer.invoke("shell:revealArtifact", absolutePath)
 });

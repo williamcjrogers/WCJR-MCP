@@ -293,6 +293,70 @@ function memoryStorePath() {
   return path.join(app.getPath("userData"), "memory-store.json");
 }
 
+function runsDirPath() {
+  return path.join(app.getPath("userData"), "runs");
+}
+
+/**
+ * Append-write a structured JSONL trace for a completed task. Used by the
+ * Replay tab: every run leaves behind a deterministic record of the prompt,
+ * every tool_call / tool_result, the final assistant response, and the
+ * outcome summary so the operator can replay with a different model or
+ * share a repro with support.
+ *
+ * Best-effort: failures are logged but never block the task's return.
+ */
+async function writeRunTrace({ taskId, summary, prompt, conversationId, remoteOrigin }) {
+  if (!taskId) return;
+  try {
+    const dir = runsDirPath();
+    await fs.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${taskId}.jsonl`);
+    const now = new Date().toISOString();
+    const lines = [];
+    lines.push(JSON.stringify({
+      type: "meta",
+      taskId,
+      conversationId: conversationId ?? null,
+      taskType: summary?.taskType ?? null,
+      model: summary?.model ?? null,
+      provider: summary?.provider ?? null,
+      runMode: summary?.runMode ?? null,
+      remoteOrigin: remoteOrigin ?? null,
+      startedAt: now
+    }));
+    lines.push(JSON.stringify({ type: "prompt", content: String(prompt ?? "") }));
+    for (const entry of summary?.toolTrace ?? []) {
+      lines.push(JSON.stringify({
+        type: "tool_trace",
+        callId: entry.id,
+        server: entry.server,
+        tool: entry.tool,
+        args: entry.args ?? null,
+        status: entry.status ?? null,
+        durationMs: entry.durationMs ?? null,
+        resultPreview: entry.resultPreview ?? "",
+        error: entry.error ?? null
+      }));
+    }
+    if (summary?.content) {
+      lines.push(JSON.stringify({ type: "response", content: String(summary.content) }));
+    }
+    lines.push(JSON.stringify({
+      type: "summary",
+      outcome: summary?.runLedger?.outcome ?? summary?.outcome ?? "unknown",
+      degradedPhases: summary?.runLedger?.degradedPhases ?? 0,
+      pendingApproval: summary?.pendingApproval === true,
+      phasesUsed: summary?.runLedger?.budget?.phasesUsed ?? null,
+      wallClockMs: summary?.runLedger?.budget?.wallClockMs ?? null,
+      endedAt: new Date().toISOString()
+    }));
+    await fs.writeFile(file, `${lines.join("\n")}\n`, "utf-8");
+  } catch (err) {
+    log.warn("writeRunTrace failed", { taskId, err: err?.message ?? String(err) });
+  }
+}
+
 function desktopCommanderConfigPath() {
   return configPath();
 }
@@ -3002,6 +3066,16 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
       );
     }
 
+    // Fire-and-forget: write a deterministic JSONL trace to <userData>/runs/
+    // so the Replay / Export flows can rehydrate or re-run this task later.
+    void writeRunTrace({
+      taskId: task.id,
+      summary,
+      prompt: rawPrompt,
+      conversationId: activeConversation.id,
+      remoteOrigin
+    });
+
     return {
       ...summary,
       pendingApproval,
@@ -3876,6 +3950,63 @@ function registerIpcHandlers() {
     return { count: summary.count, diagnostics: summary.diagnostics ?? [] };
   });
 
+  ipcMain.handle("assistant:getRunTrace", async (_event, taskId) => {
+    if (typeof taskId !== "string" || !taskId.trim()) return null;
+    const file = path.join(runsDirPath(), `${taskId}.jsonl`);
+    try {
+      const raw = await fs.readFile(file, "utf-8");
+      const lines = raw.split(/\r?\n/).filter(Boolean).map((line) => {
+        try { return JSON.parse(line); }
+        catch { return { type: "raw", content: line }; }
+      });
+      return { taskId, file, lines };
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("assistant:replayRun", async (_event, payload = {}) => {
+    const schema = z.object({
+      taskId: z.string().min(1),
+      modelOverride: z.string().optional(),
+      taskType: z.string().optional(),
+      runMode: z.enum(["direct", "sandboxed", "iterative"]).optional()
+    });
+    const parsed = schema.parse(payload);
+    const file = path.join(runsDirPath(), `${parsed.taskId}.jsonl`);
+    let trace;
+    try {
+      const raw = await fs.readFile(file, "utf-8");
+      trace = raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    } catch {
+      return { error: `No stored run for ${parsed.taskId}` };
+    }
+    const meta = trace.find((entry) => entry.type === "meta");
+    const promptEntry = trace.find((entry) => entry.type === "prompt");
+    if (!promptEntry?.content) {
+      return { error: "Run trace has no prompt to replay." };
+    }
+    log.info("replay run", {
+      originalTaskId: parsed.taskId,
+      originalModel: meta?.model ?? null,
+      modelOverride: parsed.modelOverride ?? null
+    });
+    // Replays spawn a fresh task with the original prompt and whatever
+    // overrides the caller passed. Remote-origin is scrubbed so the replay
+    // runs on the desktop UI, not pretending to be a Telegram command.
+    const summary = await runAssistantTaskRequest(
+      {
+        prompt: promptEntry.content,
+        taskType: parsed.taskType ?? meta?.taskType ?? undefined,
+        modelOverride: parsed.modelOverride ?? undefined,
+        runMode: parsed.runMode ?? meta?.runMode ?? undefined,
+        executionMode: "direct"
+      },
+      { remoteOrigin: null }
+    );
+    return { ok: true, replayedFrom: parsed.taskId, taskId: summary?.taskId ?? null, summary };
+  });
+
   ipcMain.handle("assistant:getLogs", async (_event, options = {}) => {
     const limit = Number.isFinite(options?.limit) ? Math.max(10, Math.min(2000, options.limit)) : 400;
     const logsDir = path.join(app.getPath("userData"), "logs");
@@ -4567,7 +4698,7 @@ if (gotSingleInstanceLock) {
     conversationStore = getConversationStore();
     await conversationStore.load();
     policyEngine = new PolicyEngine(appConfig?.policy ?? {});
-    const runsDir = path.join(app.getPath("userData"), "runs");
+    const runsDir = runsDirPath();
     try {
       await fs.mkdir(runsDir, { recursive: true });
     } catch (err) {

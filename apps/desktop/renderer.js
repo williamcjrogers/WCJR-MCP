@@ -1825,6 +1825,7 @@ function renderTaskOperations(task) {
       <div class="message-ops-section">
         <span class="message-ops-label">Status</span>
         <span>${escapeHtml(task.status ?? "unknown")}</span>
+        <button type="button" class="btn secondary btn-replay-task" data-task-id="${escapeHtml(task.id)}">Replay…</button>
       </div>
       ${provider || model ? `
         <div class="message-ops-section">
@@ -3557,3 +3558,38 @@ if (logsTabEls.moduleFilter) {
 if (logsTabEls.tabBtn) {
   logsTabEls.tabBtn.addEventListener("click", () => loadLogsTab());
 }
+
+// ═══════════════════════════════════════════════════════════
+// Replay button — prompts for an optional model override and re-runs the
+// task via the persisted run-<taskId>.jsonl trace. Delegated click handler
+// so we don't need to re-wire after every task-list rerender.
+// ═══════════════════════════════════════════════════════════
+document.addEventListener("click", async (event) => {
+  const btn = event.target?.closest?.(".btn-replay-task");
+  if (!btn) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const taskId = btn.dataset.taskId;
+  if (!taskId || !api?.replayRun) return;
+  const modelOverride = window.prompt(
+    "Replay this run with which model? (empty = original model)",
+    ""
+  );
+  if (modelOverride === null) return; // cancelled
+  btn.disabled = true;
+  try {
+    const result = await api.replayRun({
+      taskId,
+      modelOverride: modelOverride.trim() || undefined
+    });
+    if (result?.error) {
+      setRoutingStatus(`Replay failed: ${result.error}`);
+    } else if (result?.taskId) {
+      setRoutingStatus(`Replay started as task ${result.taskId}.`);
+    }
+  } catch (err) {
+    setRoutingStatus(`Replay failed: ${err?.message ?? err}`);
+  } finally {
+    btn.disabled = false;
+  }
+});
