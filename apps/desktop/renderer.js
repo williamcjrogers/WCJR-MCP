@@ -3403,14 +3403,17 @@ function renderSkillDetail(skill) {
     for (const tag of skill.tags) chips.push(`#${tag}`);
   }
   skillsTabEls.detail.innerHTML = `
-    <h3></h3>
+    <div class="row skill-actions">
+      <h3 class="skill-detail-name"></h3>
+      <button type="button" class="btn secondary btn-skill-export" data-id="${escapeHtml(skill.id)}">Export…</button>
+    </div>
     <p class="hint skill-description"></p>
     <div class="skill-meta"></div>
     <div class="skill-triggers hint"></div>
     <pre class="skill-body"></pre>
     <p class="hint skill-source"></p>
   `;
-  skillsTabEls.detail.querySelector("h3").textContent = skill.name;
+  skillsTabEls.detail.querySelector(".skill-detail-name").textContent = skill.name;
   skillsTabEls.detail.querySelector(".skill-description").textContent = skill.description;
   const metaEl = skillsTabEls.detail.querySelector(".skill-meta");
   for (const chip of chips) {
@@ -3480,6 +3483,47 @@ if (skillsTabEls.tabBtn) {
     loadSkillsTab();
   });
 }
+
+const skillsImportBtn = document.getElementById("btn-skills-import");
+if (skillsImportBtn) {
+  skillsImportBtn.addEventListener("click", async () => {
+    if (!api?.importSkill) return;
+    skillsImportBtn.disabled = true;
+    try {
+      const result = await api.importSkill({});
+      if (result?.cancelled) return;
+      if (result?.error) {
+        alert(`Import failed: ${result.error}`);
+        return;
+      }
+      await loadSkillsTab({ force: true });
+    } finally {
+      skillsImportBtn.disabled = false;
+    }
+  });
+}
+
+// Delegated click handler for the per-skill Export button. Lives outside the
+// skill detail render function so re-rendering doesn't strand a fresh copy.
+document.addEventListener("click", async (event) => {
+  const exportBtn = event.target?.closest?.(".btn-skill-export");
+  if (!exportBtn) return;
+  if (!api?.exportSkill) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const skillId = exportBtn.dataset.id;
+  if (!skillId) return;
+  exportBtn.disabled = true;
+  try {
+    const result = await api.exportSkill(skillId);
+    if (result?.cancelled) return;
+    if (result?.error) {
+      alert(`Export failed: ${result.error}`);
+    }
+  } finally {
+    exportBtn.disabled = false;
+  }
+});
 
 // Create-skill form. Renders inline below the detail pane. When the user
 // opts in to "generate from conversation" we pass the active conversation id

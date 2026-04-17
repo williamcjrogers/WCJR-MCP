@@ -1989,3 +1989,14 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
 .replay-diff .diff-add { color: #6ec77a; display: block; }
 .replay-diff .diff-del { color: #ff8a8a; display: block; }
 .replay-diff .diff-context { color: var(--muted); display: block; }
+
+.skill-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.skill-actions .skill-detail-name {
+  margin: 0;
+}

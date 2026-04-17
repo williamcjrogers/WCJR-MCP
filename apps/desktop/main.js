@@ -4204,6 +4204,117 @@ function registerIpcHandlers() {
     return { count: summary.count, diagnostics: summary.diagnostics ?? [] };
   });
 
+  // .wcjr-skill bundles are a single JSON file the operator can email or
+  // drop into a shared folder. Format is intentionally minimal so any future
+  // implementation can read it without parsing markdown / archives.
+  ipcMain.handle("assistant:exportSkill", async (_event, skillId) => {
+    if (typeof skillId !== "string" || !skillId.trim()) return { error: "invalid id" };
+    const skill = getSkill(skillsRegistry, skillId);
+    if (!skill) return { error: `Skill '${skillId}' not loaded.` };
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: `Export ${skill.name}`,
+      defaultPath: `${skill.id}.wcjr-skill`,
+      filters: [{ name: "WCJR Skill", extensions: ["wcjr-skill"] }]
+    });
+    if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+    const bundle = {
+      format: "wcjr-skill",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      skill: {
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        version: skill.version ?? "0.1.0",
+        triggers: skill.triggers ?? [],
+        tags: skill.tags ?? [],
+        allowedTools: skill.allowedTools ?? [],
+        internalOnly: skill.internalOnly === true
+      },
+      body: skill.body ?? ""
+    };
+    try {
+      await fs.writeFile(result.filePath, JSON.stringify(bundle, null, 2), "utf-8");
+      log.info("skill exported", { id: skill.id, path: result.filePath });
+      return { ok: true, path: result.filePath };
+    } catch (err) {
+      return { error: `Failed to write bundle: ${err?.message ?? err}` };
+    }
+  });
+
+  ipcMain.handle("assistant:importSkill", async (_event, payload = {}) => {
+    const filePath =
+      typeof payload?.filePath === "string" && payload.filePath
+        ? payload.filePath
+        : await (async () => {
+            const result = await dialog.showOpenDialog(mainWindow, {
+              title: "Import .wcjr-skill bundle",
+              properties: ["openFile"],
+              filters: [
+                { name: "WCJR Skill", extensions: ["wcjr-skill"] },
+                { name: "All", extensions: ["*"] }
+              ]
+            });
+            if (result.canceled || !result.filePaths?.[0]) return null;
+            return result.filePaths[0];
+          })();
+    if (!filePath) return { ok: false, cancelled: true };
+
+    let bundle;
+    try {
+      const raw = await fs.readFile(filePath, "utf-8");
+      bundle = JSON.parse(raw);
+    } catch (err) {
+      return { error: `Failed to read bundle: ${err?.message ?? err}` };
+    }
+    if (bundle?.format !== "wcjr-skill") {
+      return { error: "Not a .wcjr-skill bundle (missing format header)." };
+    }
+    const skill = bundle.skill ?? {};
+    if (!skill.id || !skill.name || !skill.description) {
+      return { error: "Bundle is missing skill.id / name / description." };
+    }
+    if (typeof bundle.body !== "string" || !bundle.body.trim()) {
+      return { error: "Bundle has no body to install." };
+    }
+
+    const overwrite = payload?.overwrite === true;
+    const skillDir = path.join(app.getPath("userData"), "skills", skill.id);
+    const skillFile = path.join(skillDir, "SKILL.md");
+    try {
+      const existing = await fs.stat(skillFile).catch(() => null);
+      if (existing && !overwrite) {
+        return { error: `Skill '${skill.id}' already installed. Re-import with overwrite to replace.` };
+      }
+      await fs.mkdir(skillDir, { recursive: true });
+      const triggersLine = (skill.triggers ?? [])
+        .map((t) => `"${String(t).replace(/"/g, '\\"')}"`)
+        .join(", ");
+      const tagsLine = (skill.tags ?? [])
+        .map((t) => `"${String(t).replace(/"/g, '\\"')}"`)
+        .join(", ");
+      const frontmatter = [
+        "---",
+        `id: ${skill.id}`,
+        `name: ${skill.name}`,
+        `description: "${String(skill.description).replace(/"/g, '\\"')}"`,
+        `triggers: [${triggersLine}]`,
+        `tags: [${tagsLine}]`,
+        `internalOnly: ${skill.internalOnly === true}`,
+        `version: "${skill.version ?? "0.1.0"}"`,
+        "---",
+        ""
+      ].join("\n");
+      await fs.writeFile(skillFile, `${frontmatter}${bundle.body}\n`, "utf-8");
+    } catch (err) {
+      return { error: `Failed to install: ${err?.message ?? err}` };
+    }
+
+    const summary = await reloadSkills();
+    log.info("skill imported", { id: skill.id, source: filePath });
+    return { ok: true, id: skill.id, count: summary?.count ?? 0 };
+  });
+
   ipcMain.handle("assistant:createSkill", async (_event, payload = {}) => {
     const schema = z.object({
       id: z.string().min(1).regex(/^[a-z0-9][a-z0-9_-]*$/i, "id must be a slug"),
