@@ -1826,7 +1826,15 @@ function renderTaskOperations(task) {
         <span class="message-ops-label">Status</span>
         <span>${escapeHtml(task.status ?? "unknown")}</span>
         <button type="button" class="btn secondary btn-replay-task" data-task-id="${escapeHtml(task.id)}">Replay…</button>
+        ${task.replayedFromTaskId ? `<button type="button" class="btn secondary btn-replay-diff" data-source-id="${escapeHtml(task.replayedFromTaskId)}" data-replay-id="${escapeHtml(task.id)}">Diff vs original</button>` : ""}
       </div>
+      ${task.replayedFromTaskId ? `
+        <div class="message-ops-section">
+          <span class="message-ops-label">Replayed from</span>
+          <code>${escapeHtml(task.replayedFromTaskId)}</code>
+        </div>
+      ` : ""}
+      <div class="replay-diff-pane" data-replay-pane-for="${escapeHtml(task.id)}"></div>
       ${provider || model ? `
         <div class="message-ops-section">
           <span class="message-ops-label">Model</span>
@@ -3784,7 +3792,107 @@ if (logsTabEls.tabBtn) {
 // task via the persisted run-<taskId>.jsonl trace. Delegated click handler
 // so we don't need to re-wire after every task-list rerender.
 // ═══════════════════════════════════════════════════════════
+// Tiny line-level diff (LCS-based). Returns an array of
+// { type: "context"|"add"|"del", text }. Good enough for the replay-diff
+// pane — when output gets very long, the renderer caps to the first ~400
+// changed lines so the DOM doesn't explode.
+function diffLines(oldText, newText) {
+  const a = String(oldText ?? "").split("\n");
+  const b = String(newText ?? "").split("\n");
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i -= 1) {
+    for (let j = n - 1; j >= 0; j -= 1) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) {
+      out.push({ type: "context", text: a[i] });
+      i += 1;
+      j += 1;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ type: "del", text: a[i] });
+      i += 1;
+    } else {
+      out.push({ type: "add", text: b[j] });
+      j += 1;
+    }
+  }
+  while (i < m) {
+    out.push({ type: "del", text: a[i] });
+    i += 1;
+  }
+  while (j < n) {
+    out.push({ type: "add", text: b[j] });
+    j += 1;
+  }
+  return out;
+}
+
+function renderDiffPane(pane, diff) {
+  const MAX_LINES = 400;
+  const truncated = diff.length > MAX_LINES;
+  const lines = truncated ? diff.slice(0, MAX_LINES) : diff;
+  pane.innerHTML = "";
+  const pre = document.createElement("pre");
+  pre.className = "replay-diff";
+  for (const line of lines) {
+    const span = document.createElement("span");
+    span.className = `diff-${line.type}`;
+    const prefix = line.type === "add" ? "+ " : line.type === "del" ? "- " : "  ";
+    span.textContent = `${prefix}${line.text}\n`;
+    pre.appendChild(span);
+  }
+  pane.appendChild(pre);
+  if (truncated) {
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = `Truncated to first ${MAX_LINES} changed lines.`;
+    pane.appendChild(note);
+  }
+}
+
 document.addEventListener("click", async (event) => {
+  const diffBtn = event.target?.closest?.(".btn-replay-diff");
+  if (diffBtn) {
+    event.preventDefault();
+    event.stopPropagation();
+    const sourceId = diffBtn.dataset.sourceId;
+    const replayId = diffBtn.dataset.replayId;
+    const pane = document.querySelector(`.replay-diff-pane[data-replay-pane-for="${replayId}"]`);
+    if (!sourceId || !replayId || !pane || !api?.getRunDiff) return;
+    diffBtn.disabled = true;
+    pane.textContent = "Loading diff…";
+    try {
+      const result = await api.getRunDiff({ sourceTaskId: sourceId, replayTaskId: replayId });
+      if (result?.error) {
+        pane.textContent = `Could not load diff: ${result.error}`;
+        return;
+      }
+      const header = document.createElement("div");
+      header.className = "replay-diff-header";
+      const srcLabel = `${result.source.model ?? "?"} (${sourceId.slice(-6)})`;
+      const repLabel = `${result.replay.model ?? "?"} (${replayId.slice(-6)})`;
+      header.innerHTML = `
+        <span class="diff-key diff-del-key">- ${escapeHtml(srcLabel)}</span>
+        <span class="diff-key diff-add-key">+ ${escapeHtml(repLabel)}</span>
+      `;
+      pane.innerHTML = "";
+      pane.appendChild(header);
+      const diff = diffLines(result.source.response, result.replay.response);
+      renderDiffPane(pane, diff);
+    } catch (err) {
+      pane.textContent = `Diff failed: ${err?.message ?? err}`;
+    } finally {
+      diffBtn.disabled = false;
+    }
+    return;
+  }
   const btn = event.target?.closest?.(".btn-replay-task");
   if (!btn) return;
   event.preventDefault();

@@ -4296,8 +4296,9 @@ function registerIpcHandlers() {
       modelOverride: parsed.modelOverride ?? null
     });
     // Replays spawn a fresh task with the original prompt and whatever
-    // overrides the caller passed. Remote-origin is scrubbed so the replay
-    // runs on the desktop UI, not pretending to be a Telegram command.
+    // overrides the caller passed. Remote-origin carries `replayedFromTaskId`
+    // so the renderer can link the new task back to its source and surface a
+    // diff of the two responses.
     const summary = await runAssistantTaskRequest(
       {
         prompt: promptEntry.content,
@@ -4306,9 +4307,81 @@ function registerIpcHandlers() {
         runMode: parsed.runMode ?? meta?.runMode ?? undefined,
         executionMode: "direct"
       },
-      { remoteOrigin: null }
+      {
+        remoteOrigin: {
+          channel: "replay",
+          replayedFromTaskId: parsed.taskId,
+          originalModel: meta?.model ?? null,
+          requestedModelOverride: parsed.modelOverride ?? null
+        }
+      }
     );
+    // Stamp the new task record with replayedFromTaskId so list rendering
+    // can show the link without parsing remoteOrigin.
+    if (summary?.taskId) {
+      const store = getTaskStore();
+      const newTask = store.get(summary.taskId);
+      if (newTask) {
+        store.update(summary.taskId, {
+          replayedFromTaskId: parsed.taskId
+        });
+        await store.save();
+      }
+    }
     return { ok: true, replayedFrom: parsed.taskId, taskId: summary?.taskId ?? null, summary };
+  });
+
+  ipcMain.handle("assistant:getRunDiff", async (_event, payload = {}) => {
+    const schema = z.object({
+      sourceTaskId: z.string().min(1),
+      replayTaskId: z.string().min(1)
+    });
+    let parsed;
+    try {
+      parsed = schema.parse(payload);
+    } catch (err) {
+      return { error: err?.issues?.[0]?.message ?? err?.message ?? "invalid payload" };
+    }
+    async function loadRun(taskId) {
+      const file = path.join(runsDirPath(), `${taskId}.jsonl`);
+      try {
+        const raw = await fs.readFile(file, "utf-8");
+        return raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+      } catch {
+        return null;
+      }
+    }
+    const [sourceTrace, replayTrace] = await Promise.all([
+      loadRun(parsed.sourceTaskId),
+      loadRun(parsed.replayTaskId)
+    ]);
+    if (!sourceTrace || !replayTrace) {
+      return { error: "One or both run traces are missing." };
+    }
+    function pickResponse(trace) {
+      return trace.find((entry) => entry.type === "response")?.content ?? "";
+    }
+    function pickMeta(trace) {
+      return trace.find((entry) => entry.type === "meta") ?? {};
+    }
+    const sourceMeta = pickMeta(sourceTrace);
+    const replayMeta = pickMeta(replayTrace);
+    return {
+      source: {
+        taskId: parsed.sourceTaskId,
+        model: sourceMeta.model ?? null,
+        provider: sourceMeta.provider ?? null,
+        startedAt: sourceMeta.startedAt ?? null,
+        response: pickResponse(sourceTrace)
+      },
+      replay: {
+        taskId: parsed.replayTaskId,
+        model: replayMeta.model ?? null,
+        provider: replayMeta.provider ?? null,
+        startedAt: replayMeta.startedAt ?? null,
+        response: pickResponse(replayTrace)
+      }
+    };
   });
 
   ipcMain.handle("assistant:getLogs", async (_event, options = {}) => {
