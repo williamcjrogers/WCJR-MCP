@@ -2337,7 +2337,53 @@ function buildToolPolicyRule(serverName, toolName, args = {}) {
   return null;
 }
 
-function evaluateToolPolicy({ serverName, toolName, args = {}, policyApproved = false }) {
+/**
+ * Translate a workspace pattern (`filesystem_*`, `git_commit`, `*`) into a
+ * RegExp. The pattern matches against `<serverSlug>__<toolSlug>` (case-insensitive)
+ * — the same shape the agent sees when calling tools, so workspace authors
+ * can write `filesystem_*` and have it cover every filesystem MCP tool.
+ */
+function workspaceToolPatternToRegex(pattern) {
+  const safe = String(pattern).trim().replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  const expanded = safe.replace(/\*/g, ".*");
+  return new RegExp(`^${expanded}$`, "i");
+}
+
+function workspaceAllowsTool(allowedTools, serverName, toolName) {
+  if (!Array.isArray(allowedTools) || allowedTools.length === 0) return true;
+  const haystack = `${String(serverName).toLowerCase().replace(/[^a-z0-9]+/g, "_")}__${String(toolName).toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
+  for (const pattern of allowedTools) {
+    try {
+      if (workspaceToolPatternToRegex(pattern).test(haystack)) return true;
+      // Also test against the bare tool name so `git_commit` matches when
+      // the operator wrote the pattern without a server prefix.
+      if (workspaceToolPatternToRegex(pattern).test(toolName)) return true;
+    } catch {
+      // Bad pattern — skip it.
+    }
+  }
+  return false;
+}
+
+function evaluateToolPolicy({ serverName, toolName, args = {}, policyApproved = false, workspaceAllowedTools = null }) {
+  // Workspace allowlist gate runs FIRST, before any user policy. The intent
+  // is that a workspace explicitly says "this project only uses these MCPs"
+  // and nothing — not even a permissive autonomy policy — overrides that.
+  if (Array.isArray(workspaceAllowedTools) && workspaceAllowedTools.length > 0) {
+    if (!workspaceAllowsTool(workspaceAllowedTools, serverName, toolName)) {
+      return {
+        decision: "deny",
+        message: `Policy blocked ${serverName}.${toolName}: not in this workspace's allowedTools list.`,
+        policy: {
+          actionType: "workspace_allowlist",
+          decision: "deny",
+          reason: "tool not in workspace allowlist",
+          context: { serverName, toolName, allowedTools: workspaceAllowedTools }
+        }
+      };
+    }
+  }
+
   const rule = buildToolPolicyRule(serverName, toolName, args);
   if (!rule) {
     return {
@@ -2474,7 +2520,8 @@ async function invokeAgenticModel({
         serverName: server,
         toolName: tool,
         args,
-        policyApproved: taskContext?.policyApproved === true
+        policyApproved: taskContext?.policyApproved === true,
+        workspaceAllowedTools: taskContext?.workspaceAllowedTools ?? null
       }),
     maxIterations: 10,
     signal,
@@ -2833,6 +2880,10 @@ async function runAssistantTaskRequest(payload, runtime = {}) {
   const taskContext = {
     taskId: task.id,
     policyApproved,
+    // Workspace-level allowlist takes precedence over the user policy. If
+    // the workspace says only filesystem_* / git_* are allowed, no tool loop
+    // (orchestrator or specialist) can call anything else for this task.
+    workspaceAllowedTools: activeWorkspace?.config?.allowedTools ?? null,
     onProgress: (progress) => {
       store.update(task.id, { progress });
       store.save();
