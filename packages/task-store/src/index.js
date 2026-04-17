@@ -3,6 +3,8 @@
  * Supports task records, progress states, resumable work units, and audit trail.
  */
 
+import { parseCronExpression, nextCronRun } from "./cron.js";
+
 async function writeFileAtomic(storagePath, contents) {
   const { writeFile, rename, mkdir, unlink } = await import("node:fs/promises");
   const dir = storagePath.replace(/[/\\][^/\\]+$/, "");
@@ -59,18 +61,30 @@ export const TASK_STATUS = {
 
 /**
  * Given the current time, return the next time a schedule should fire.
- * Interval schedules are straightforward (nextRunAt = now + intervalMs).
- * Anything richer (cron, calendar) would live here in future revisions —
- * kept deliberately tiny for now so the worker loop has one shape to handle.
+ *   { type: "interval", intervalMs }   - simple cadence
+ *   { type: "cron", expr: "* * * * *" } - 5-field POSIX cron
+ *
+ * Returns ISO-8601 string or null when the schedule is disabled / unknown.
  */
 export function computeNextRunAt(schedule, now = new Date()) {
   if (!schedule || schedule.enabled === false) return null;
+  const base = now instanceof Date ? now : new Date(now);
   if (schedule.type === "interval" && Number.isFinite(schedule.intervalMs)) {
-    const base = now instanceof Date ? now : new Date(now);
     return new Date(base.getTime() + schedule.intervalMs).toISOString();
+  }
+  if (schedule.type === "cron" && typeof schedule.expr === "string") {
+    try {
+      const parsed = parseCronExpression(schedule.expr);
+      const next = nextCronRun(parsed, base);
+      return next ? next.toISOString() : null;
+    } catch {
+      return null;
+    }
   }
   return null;
 }
+
+export { parseCronExpression, nextCronRun } from "./cron.js";
 
 /**
  * In-memory task store with optional persistence.

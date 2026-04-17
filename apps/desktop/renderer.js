@@ -3511,11 +3511,24 @@ if (skillsFormEls.cancel) {
 // ═══════════════════════════════════════════════════════════
 const schedulerEls = {
   prompt: document.getElementById("scheduled-prompt"),
+  kind: document.getElementById("scheduled-kind"),
+  intervalRow: document.getElementById("scheduled-interval-row"),
   interval: document.getElementById("scheduled-interval"),
   submit: document.getElementById("btn-schedule-task"),
+  cronRow: document.getElementById("scheduled-cron-row"),
+  cron: document.getElementById("scheduled-cron"),
+  submitCron: document.getElementById("btn-schedule-task-cron"),
   list: document.getElementById("scheduled-tasks-list"),
   settingsTabBtn: document.querySelector('.tab-btn[data-tab="settings"]')
 };
+
+if (schedulerEls.kind) {
+  schedulerEls.kind.addEventListener("change", () => {
+    const cron = schedulerEls.kind.value === "cron";
+    schedulerEls.intervalRow?.classList.toggle("hidden", cron);
+    schedulerEls.cronRow?.classList.toggle("hidden", !cron);
+  });
+}
 
 function renderScheduledTasks(tasks) {
   if (!schedulerEls.list) return;
@@ -3529,13 +3542,20 @@ function renderScheduledTasks(tasks) {
     const nextRunAt = schedule.nextRunAt
       ? new Date(schedule.nextRunAt).toLocaleString()
       : "(paused)";
-    const intervalMin = schedule.intervalMs ? Math.round(schedule.intervalMs / 60000) : "?";
+    let cadence;
+    if (schedule.type === "cron" && schedule.expr) {
+      cadence = `cron \`${schedule.expr}\``;
+    } else if (schedule.intervalMs) {
+      cadence = `every ${Math.round(schedule.intervalMs / 60000)}m`;
+    } else {
+      cadence = "?";
+    }
     const item = document.createElement("div");
     item.className = `scheduled-task-item ${schedule.enabled === false ? "disabled" : ""}`;
     item.innerHTML = `
       <div>
         <div class="scheduled-task-prompt" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt)}</div>
-        <div class="scheduled-task-meta">every ${escapeHtml(String(intervalMin))}m · next ${escapeHtml(nextRunAt)}</div>
+        <div class="scheduled-task-meta">${escapeHtml(cadence)} · next ${escapeHtml(nextRunAt)}</div>
       </div>
       <button type="button" class="btn secondary btn-scheduled-run" data-id="${escapeHtml(task.id)}">Run now</button>
       <button type="button" class="btn secondary btn-scheduled-toggle" data-id="${escapeHtml(task.id)}">${schedule.enabled === false ? "Enable" : "Pause"}</button>
@@ -3561,25 +3581,39 @@ if (schedulerEls.settingsTabBtn) {
   schedulerEls.settingsTabBtn.addEventListener("click", () => refreshScheduledTasks());
 }
 
+async function submitSchedule(payload, button) {
+  if (!api?.createScheduledTask) return;
+  if (!payload.prompt) return;
+  if (button) button.disabled = true;
+  try {
+    const result = await api.createScheduledTask(payload);
+    if (result?.error) {
+      alert(`Could not schedule: ${result.error}`);
+    } else {
+      if (schedulerEls.prompt) schedulerEls.prompt.value = "";
+      if (schedulerEls.cron) schedulerEls.cron.value = "";
+      await refreshScheduledTasks();
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 if (schedulerEls.submit) {
   schedulerEls.submit.addEventListener("click", async () => {
-    if (!api?.createScheduledTask) return;
     const prompt = (schedulerEls.prompt?.value ?? "").trim();
     const intervalMinutes = Number(schedulerEls.interval?.value ?? "60");
-    if (!prompt) return;
     if (!Number.isFinite(intervalMinutes) || intervalMinutes < 1) return;
-    schedulerEls.submit.disabled = true;
-    try {
-      const result = await api.createScheduledTask({ prompt, intervalMinutes });
-      if (result?.error) {
-        alert(`Could not schedule: ${result.error}`);
-      } else {
-        schedulerEls.prompt.value = "";
-        await refreshScheduledTasks();
-      }
-    } finally {
-      schedulerEls.submit.disabled = false;
-    }
+    await submitSchedule({ prompt, intervalMinutes }, schedulerEls.submit);
+  });
+}
+
+if (schedulerEls.submitCron) {
+  schedulerEls.submitCron.addEventListener("click", async () => {
+    const prompt = (schedulerEls.prompt?.value ?? "").trim();
+    const cronExpr = (schedulerEls.cron?.value ?? "").trim();
+    if (!cronExpr) return;
+    await submitSchedule({ prompt, cronExpr }, schedulerEls.submitCron);
   });
 }
 

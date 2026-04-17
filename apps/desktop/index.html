@@ -559,10 +559,22 @@
                 <input id="scheduled-prompt" class="text-input" type="text" placeholder="Task prompt" />
               </div>
               <div class="row">
+                <label>Schedule</label>
+                <select id="scheduled-kind" class="profile-select">
+                  <option value="interval" selected>Every N minutes</option>
+                  <option value="cron">Cron expression</option>
+                </select>
+              </div>
+              <div id="scheduled-interval-row" class="row">
                 <label>Every</label>
-                <input id="scheduled-interval" class="text-input" type="number" min="5" value="60" />
+                <input id="scheduled-interval" class="text-input" type="number" min="1" value="60" />
                 <label>minutes</label>
                 <button id="btn-schedule-task" type="button" class="btn secondary">Schedule</button>
+              </div>
+              <div id="scheduled-cron-row" class="row hidden">
+                <label>Cron</label>
+                <input id="scheduled-cron" class="text-input" type="text" placeholder="30 9 * * 1-5  (09:30 weekdays)" />
+                <button id="btn-schedule-task-cron" type="button" class="btn secondary">Schedule</button>
               </div>
               <div id="scheduled-tasks-list" class="scheduled-tasks-list"></div>
             </section>

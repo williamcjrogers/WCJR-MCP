@@ -3961,9 +3961,13 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("assistant:createScheduledTask", async (_event, payload = {}) => {
+    // Accept either { intervalMinutes } or { cronExpr }. Cron schedules are
+    // validated via computeNextRunAt — anything that fails parsing is rejected
+    // before the scheduler ever sees it.
     const schema = z.object({
       prompt: z.string().min(1),
-      intervalMinutes: z.number().int().positive().max(60 * 24 * 14),
+      intervalMinutes: z.number().int().positive().max(60 * 24 * 14).optional(),
+      cronExpr: z.string().min(1).optional(),
       taskType: z.string().optional(),
       runMode: z.enum(["direct", "sandboxed", "iterative"]).optional(),
       enabled: z.boolean().optional(),
@@ -3975,17 +3979,43 @@ function registerIpcHandlers() {
     } catch (err) {
       return { error: err?.issues?.[0]?.message ?? err?.message ?? "invalid payload" };
     }
+    if (!parsed.intervalMinutes && !parsed.cronExpr) {
+      return { error: "Either intervalMinutes or cronExpr is required." };
+    }
+
+    let schedule;
+    if (parsed.cronExpr) {
+      // Validate by attempting to compute the next run. Empty result =>
+      // expression parsed but never fires (e.g. impossible date) — reject.
+      const probe = computeNextRunAt(
+        { type: "cron", expr: parsed.cronExpr, enabled: true },
+        new Date()
+      );
+      if (!probe) {
+        return { error: `cron expression '${parsed.cronExpr}' is invalid or never fires.` };
+      }
+      schedule = {
+        type: "cron",
+        expr: parsed.cronExpr,
+        enabled: parsed.enabled !== false,
+        nextRunAt: probe,
+        createdAt: new Date().toISOString(),
+        lastRunAt: null
+      };
+    } else {
+      const intervalMs = parsed.intervalMinutes * 60 * 1000;
+      const firstRunOffsetMs = (parsed.firstRunInMinutes ?? parsed.intervalMinutes) * 60 * 1000;
+      schedule = {
+        type: "interval",
+        intervalMs,
+        enabled: parsed.enabled !== false,
+        nextRunAt: new Date(Date.now() + firstRunOffsetMs).toISOString(),
+        createdAt: new Date().toISOString(),
+        lastRunAt: null
+      };
+    }
+
     const store = getTaskStore();
-    const intervalMs = parsed.intervalMinutes * 60 * 1000;
-    const firstRunOffsetMs = (parsed.firstRunInMinutes ?? parsed.intervalMinutes) * 60 * 1000;
-    const schedule = {
-      type: "interval",
-      intervalMs,
-      enabled: parsed.enabled !== false,
-      nextRunAt: new Date(Date.now() + firstRunOffsetMs).toISOString(),
-      createdAt: new Date().toISOString(),
-      lastRunAt: null
-    };
     const template = store.create({
       prompt: parsed.prompt,
       taskType: parsed.taskType ?? null,
@@ -3995,7 +4025,7 @@ function registerIpcHandlers() {
     await store.save();
     log.info("scheduled task created", {
       id: template.id,
-      intervalMinutes: parsed.intervalMinutes,
+      kind: schedule.type,
       nextRunAt: schedule.nextRunAt
     });
     return { ok: true, task: store.get(template.id) };

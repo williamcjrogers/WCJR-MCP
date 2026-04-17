@@ -169,7 +169,19 @@ test("computeNextRunAt advances by intervalMs for enabled interval schedules", (
 test("computeNextRunAt returns null for disabled or unknown schedule types", () => {
   assert.equal(computeNextRunAt(null), null);
   assert.equal(computeNextRunAt({ type: "interval", intervalMs: 1000, enabled: false }), null);
-  assert.equal(computeNextRunAt({ type: "cron", expr: "* * * * *" }), null);
+  assert.equal(computeNextRunAt({ type: "what-even-is-this" }), null);
+  // Malformed cron expressions also fall back to null so the scheduler
+  // doesn't get stuck in a tight loop on user typos.
+  assert.equal(computeNextRunAt({ type: "cron", expr: "garbage" }), null);
+});
+
+test("computeNextRunAt accepts valid cron expressions", () => {
+  const result = computeNextRunAt(
+    { type: "cron", expr: "*/15 * * * *" },
+    new Date("2026-04-16T12:07:00.000Z")
+  );
+  assert.ok(result, "should return an ISO string");
+  assert.match(result, /T12:15:00/);
 });
 
 test("TASK_STATUS exposes SCHEDULED", () => {
